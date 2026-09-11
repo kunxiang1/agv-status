@@ -9,7 +9,7 @@
 ```bash
 # 1. 配置现场 RCS 环境（必填，全部走环境变量，代码里零凭据）
 export RCS_WEB=http://<CMS主机>:8181    # Web CMS 地址（登录/拉地图）
-export RCS_ENGINE=<调度引擎IP>          # 6990 推送引擎主机
+export RCS_ENGINE=<调度引擎IP>          # 6990 推送引擎主机,在服务-配置里找。见screenshots里的截图
 export RCS_USER=<用户名>
 export RCS_PWD=<密码明文>               # 程序内只用于 sha256，不落盘
 
@@ -72,6 +72,7 @@ index.html (前端)
 ## 3. 协议实现（rcs_push.py）
 
 ### 3.1 接入前提：IP 登记
+
 推送引擎的准入是 **IP 级**：任何一次成功的 Web 登录
 （`POST http://<CMS>:8181/rcms/web/login/login.action`，参数
 `ecsUserName=<用户>&ecsPassword=<sha256(密码)>&pwdSafeLevelLogin=0`）
@@ -79,6 +80,7 @@ index.html (前端)
 保活均可订阅；GUID 不是凭证、密码不进 6990）。`rcs_push.login()` 即此一步。
 
 ### 3.2 ZMTP 3.0 订阅握手（照抄 MonitorClient 逐字节）
+
 ```
 TCP connect <引擎IP>:6990
 recv 10B  ff 00×7 01 7f                  # 服务器 greeting：NULL|ZMTP3.0|127 octets
@@ -87,9 +89,11 @@ send 54B  03 00 "NULL" + 48×00           # NULL 命令帧——必须整 54 字
 send 30B  04 19 05 "READY" 0b "Socket-Type" 00 00 00 03 "SUB" 00 01 01   # 订阅者身份
 → 服务器立即开始全量推送（不按 topic 过滤，所有地图所有车一起推）
 ```
+
 8790（告警通道，门户机）握手完全相同，连上后先回放活动告警再收新告警。
 
 ### 3.3 帧格式（无加密，载荷就是可读 XML）
+
 ```
 偏移  长度  含义
 0     1     魔数 0x02
@@ -100,15 +104,17 @@ send 30B  04 19 05 "READY" 0b "Socket-Type" 00 00 00 03 "SUB" 00 01 01   # 订�
 16    65    0x00 填充                     # 帧头共 81 字节
 81    N     UTF-8 XML，\0 结尾
 ```
+
 解析器用 `<?xml` 起点 + NUL 终点的宽松扫帧（`iter_msgs`），不依赖帧头长度字段。
 
 ### 3.4 消息类型 → 事件（`parse_frame`）
-| RCS Type | 事件 | 内容 |
-|---|---|---|
-| ROBOT_STATUS | `status` | 每车：Id/Pos(x,y mm)/Direction/Battery/Speed/Status/Stop/Remove/**Pod(货架)**…（REST 同构字段，前端零改动兼容） |
-| ROBOT_PATH | `path` | 每车剩余规划线 `<Path x y th/>` 序列 |
-| ROBOT_OFFLINE | `offline` | 掉线车号列表 |
-| AlarmMessage | `alarm` | MainType/SubType/AlarmStatus(1=告警 0=恢复)/Level/Source/Time/Map |
+
+| RCS Type      | 事件      | 内容                                                                                                            |
+| ------------- | --------- | --------------------------------------------------------------------------------------------------------------- |
+| ROBOT_STATUS  | `status`  | 每车：Id/Pos(x,y mm)/Direction/Battery/Speed/Status/Stop/Remove/**Pod(货架)**…（REST 同构字段，前端零改动兼容） |
+| ROBOT_PATH    | `path`    | 每车剩余规划线 `<Path x y th/>` 序列                                                                            |
+| ROBOT_OFFLINE | `offline` | 掉线车号列表                                                                                                    |
+| AlarmMessage  | `alarm`   | MainType/SubType/AlarmStatus(1=告警 0=恢复)/Level/Source/Time/Map                                               |
 
 货架配对是本项目踩过的坑：推送 XML 里 `<Pod>` 是 `<Robot>` 的**兄弟节点**（REST 把它
 拍平进了每车 JSON），必须用组合正则 `<Robot>(.*?)</Robot>\s*(?:<Pod>(.*?)</Pod>)?`
@@ -120,7 +126,9 @@ send 30B  04 19 05 "READY" 0b "Socket-Type" 00 00 00 03 "SUB" 00 01 01   # 订�
 推送下依然是上限，**不重构**，只做了节奏自适应（§4.2）。
 
 ### 4.1 运动模型：导航式弧长进度（map matching + dead reckoning）
+
 参照高德/腾讯导航小车的做法，第三版（前两版"自由坐标+事后校斜"被用户否决）：
+
 - 车辆不是自由坐标点，而是剩余路线折线 `a.poly` 上的**弧长进度 s**；位置=`posAt(s)`，
   车头=段切向量。上报坐标只做两件事：初始落位投影 + 推进目标 `sEnd`。
 - **速度绝不用上报 speed 字段**（粒度粗、常报 0，不可信）：每帧
@@ -132,11 +140,13 @@ send 30B  04 19 05 "READY" 0b "Socket-Type" 00 00 00 03 "SUB" 00 01 01   # 订�
 - 进弯/到终点前 0.5m 线性收油到 cap（90°=0.25m/s、掉头=0.1）。
 
 ### 4.2 为 5Hz 推送做的唯一改动：节奏自适应
+
 引擎里两处原按 5000ms 周期设计的常数改从**实测帧间隔 EMA**（`a._gap`，ingest 里更新）
 取值：`vCyc` 分母、迟到追帧窗口。逻辑不变，只是时间预算随推送节奏缩放——5s 轮询退
 回旧行为仍正确（`_dev/_live_test.js` 用 5s 间隔快照跑通旧断言即为证明）。
 
 ### 4.3 事件流与过滤
+
 - `handle()` 入口先按 **当前地图** 过滤：跨图车辆、跨图告警直接丢弃（非本图内容=噪声）。
 - 状态帧带空 path 时沿用上拍 ROBOT_PATH（推送里两型分开到达）。
 - ROBOT_OFFLINE / 8s 无 status → 车标失联；SSE 断开 → 顶栏"断线"，重连由浏览器 EventSource 失败回退 2s 轮询触发。
@@ -151,11 +161,11 @@ send 30B  04 19 05 "READY" 0b "Socket-Type" 00 00 00 03 "SUB" 00 01 01   # 订�
 
 三个口子，按需选：
 
-| 方式 | 说明 |
-|---|---|
-| **SSE `/api/events`** | 推荐。`EventSource("/api/events")`，每事件一行 JSON：`{"e":"status"|"path"|"offline"|"alarm", ...}`（字段见 §3.4）。server 已把 RCS→server 收敛为单条订阅，多消费方共享。 |
-| **`GET /api/snapshot`** | 拉平式：当前全部车辆最新状态（REST 同构字段+`online`+`path`），零主动通讯，适合轮询型集成/测试。 |
-| **`import rcs_push`** | 不要 server：`rcs_push.iter_msgs(RCS_ENGINE, 6990)` + `parse_frame()` 直接拿事件 dict；CLI `python rcs_push.py <地图简称>` 输出 JSONL 实时流，可管进任何数据管道。 |
+| 方式                    | 说明                                                                                                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **SSE `/api/events`**   | 推荐。`EventSource("/api/events")`，每事件一行 JSON：`{"e":"status"                                                                                                |
+| **`GET /api/snapshot`** | 拉平式：当前全部车辆最新状态（REST 同构字段+`online`+`path`），零主动通讯，适合轮询型集成/测试。                                                                   |
+| **`import rcs_push`**   | 不要 server：`rcs_push.iter_msgs(RCS_ENGINE, 6990)` + `parse_frame()` 直接拿事件 dict；CLI `python rcs_push.py <地图简称>` 输出 JSONL 实时流，可管进任何数据管道。 |
 
 地图数据 `maps/*.json`：`{name, qr, nodes:[[id,x米,y米,类型值]], edges:[[a,b]]}`，
 前端 `index.html` 里的节点类型字典（`TYPE_COLORS`，17 种）对照现场 CMS 地码类型配置，
@@ -163,17 +173,17 @@ send 30B  04 19 05 "READY" 0b "Socket-Type" 00 00 00 03 "SUB" 00 01 01   # 订�
 
 ## 6. 文件清单
 
-| 文件 | 职责 |
-|---|---|
-| `server.py` | 订阅线程 + SSE 广播 + 手动地图同步 + 静态服务 + 快照端点（唯一后端入口） |
-| `rcs_push.py` | RCS 私有通道客户端：登录/ZMTP 握手/扫帧/解析（可独立当 CLI 用：`python rcs_push.py CC` 输出 JSONL） |
-| `index.html` | 前端全部：事件处理 + 弧长动画引擎 + canvas 渲染（车形参照现场车型 780×545mm） |
-| `parse_map.py` | 地图拓扑 XML → `maps/<图名>.json`（nodes/edges，坐标米制） |
-| `status.js` | 机器人状态值 168 条中文字典（出自海康告警信息表 xlsx） |
-| `alarm.js` | 机器人告警码字典：MainType→SubType→名称/等级/含义，643 条（同上表生成） |
-| `maps/` | 4 张示例地图 JSON（⟳同步地图按钮可从你的 CMS 拉取覆盖） |
-| `_dev/` | 开发期断言与文档：`_nav_test.js` 动画引擎 12 组纯逻辑用例（node 直跑）；`_live_test.js` 真实数据端到端（需 server 在跑）；`_verify.py` CMS 未公开接口验证（需 env，可重跑）；`RCS-2000_未公开接口补充.md` 实测接口文档 |
-| `协议分析报告_monitor-rcs.md` | MonitorClient 抓包分析全文（私有通道发现的完整证据链） |
+| 文件                          | 职责                                                                                                                                                                                                                   |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server.py`                   | 订阅线程 + SSE 广播 + 手动地图同步 + 静态服务 + 快照端点（唯一后端入口）                                                                                                                                               |
+| `rcs_push.py`                 | RCS 私有通道客户端：登录/ZMTP 握手/扫帧/解析（可独立当 CLI 用：`python rcs_push.py CC` 输出 JSONL）                                                                                                                    |
+| `index.html`                  | 前端全部：事件处理 + 弧长动画引擎 + canvas 渲染（车形参照现场车型 780×545mm）                                                                                                                                          |
+| `parse_map.py`                | 地图拓扑 XML → `maps/<图名>.json`（nodes/edges，坐标米制）                                                                                                                                                             |
+| `status.js`                   | 机器人状态值 168 条中文字典（出自海康告警信息表 xlsx）                                                                                                                                                                 |
+| `alarm.js`                    | 机器人告警码字典：MainType→SubType→名称/等级/含义，643 条（同上表生成）                                                                                                                                                |
+| `maps/`                       | 4 张示例地图 JSON（⟳同步地图按钮可从你的 CMS 拉取覆盖）                                                                                                                                                                |
+| `_dev/`                       | 开发期断言与文档：`_nav_test.js` 动画引擎 12 组纯逻辑用例（node 直跑）；`_live_test.js` 真实数据端到端（需 server 在跑）；`_verify.py` CMS 未公开接口验证（需 env，可重跑）；`RCS-2000_未公开接口补充.md` 实测接口文档 |
+| `协议分析报告_monitor-rcs.md` | MonitorClient 抓包分析全文（私有通道发现的完整证据链）                                                                                                                                                                 |
 
 UI 只有 ⟳同步地图 一个按钮（推送架构下"暂停查询"无意义，地图更新本就人工控制）。
 
