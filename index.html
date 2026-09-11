@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>AGV 实时监控 · RCS-2000</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--border:#2a3140;--fg:#e6edf3;--dim:#8b949e;
+        --green:#3fb950;--blue:#58a6ff;--orange:#d29922;--red:#f85149;--teal:#39c5cf;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);color:var(--fg);
+    font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;overflow:hidden}
+  #top{display:flex;align-items:center;gap:14px;height:46px;padding:0 14px;
+    background:var(--panel);border-bottom:1px solid var(--border)}
+  #top h1{font-size:15px;font-weight:600}
+  select,button{background:#21262d;color:var(--fg);border:1px solid var(--border);
+    border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer}
+  #stat{margin-left:auto;display:flex;gap:14px;color:var(--dim)}
+  #stat b{color:var(--fg)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:1px}
+  #wrap{display:flex;height:calc(100% - 46px)}
+  #stage{flex:1;position:relative;min-width:0;background:#eef1f5}
+  canvas{display:block;width:100%;height:100%}
+  #side{width:320px;border-left:1px solid var(--border);background:var(--panel);
+    display:flex;flex-direction:column}
+  #side h2{font-size:12px;color:var(--dim);font-weight:600;padding:10px 12px 6px;
+    text-transform:uppercase;letter-spacing:.5px}
+  #list{overflow-y:auto;flex:1}
+  .row{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;
+    border-bottom:1px solid #21262d}
+  .row:hover,.row.sel{background:#1c2431}
+  .rid{width:34px;font-weight:700;font-size:14px}
+  .rinfo{flex:1;min-width:0;color:var(--dim)}
+  .rinfo .st{color:var(--fg)}
+  .bat{width:62px;height:24px;border:1px solid var(--border);border-radius:4px;position:relative;background:#0d1117;flex:none}
+  .bat i{position:absolute;inset:2px;width:calc(var(--p)*1% - 4px);border-radius:3px;background:var(--blue)}
+  .bat.low i{background:var(--red)} .bat.mid i{background:var(--orange)}
+  .bat b{position:absolute;inset:0;text-align:center;font:700 13px/24px Consolas,monospace;color:#fff;
+    text-shadow:0 0 2px #000,0 0 4px #000}
+  .badge{font-size:10px;border-radius:4px;padding:1px 5px;background:#e8eef5;color:#1f2937;font-weight:600}
+  .badge.warn{background:#4d2d00;color:#e3b341}.badge.err{background:#5a1e02;color:#ff8c7a}
+  #detail{border-top:1px solid var(--border);padding:10px 12px;min-height:180px;font-size:12px}
+  #detail table{width:100%;border-collapse:collapse}
+  #detail td{padding:2px 4px;color:var(--dim)}
+  #detail td+td{color:var(--fg);text-align:right;font-family:Consolas,monospace}
+  #tip{position:absolute;pointer-events:none;background:#1c2431ee;border:1px solid var(--border);
+    border-radius:6px;padding:6px 10px;font-size:12px;display:none;z-index:5;white-space:pre;color:#e6edf3}
+  #legend{position:absolute;left:10px;bottom:10px;background:#ffffffdd;border:1px solid #c9d1d9;
+    border-radius:8px;padding:8px 12px;display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:#444}
+  #msg{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:6px 16px;border-radius:6px;
+    background:#5a1e02;color:#ff8c7a;border:1px solid #f8514955;display:none}
+</style>
+</head>
+<body>
+<div id="top">
+  <h1>🚦 AGV 实时监控</h1>
+  <label>地图 <select id="mapSel"></select></label>
+  <button id="sync">⟳ 同步地图</button>
+  <span style="color:var(--dim)">滚轮缩放 · 拖动平移 · 点车看详情</span>
+  <div id="stat">
+    <span><span class="dot" style="background:var(--green)"></span>运行 <b id="cRun">0</b></span>
+    <span><span class="dot" style="background:var(--blue)"></span>空闲 <b id="cIdle">0</b></span>
+    <span><span class="dot" style="background:var(--orange)"></span>充电 <b id="cChg">0</b></span>
+    <span><span class="dot" style="background:var(--red)"></span>异常 <b id="cErr">0</b></span>
+    <span>离线 <b id="cOff">0</b></span>
+    <span id="src" style="color:var(--teal)">连接中</span>
+    <span id="lastOk"></span>
+  </div>
+</div>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="tip"></div>
+    <div id="msg"></div>
+    <div id="legend"></div>
+  </div>
+  <div id="side">
+    <h2>车辆列表</h2>
+    <div id="list"></div>
+    <div id="alarms" style="max-height:30%;overflow-y:auto;border-top:1px solid var(--border)"></div>
+    <h2>选中车辆</h2>
+    <div id="detail"><span style="color:var(--dim)">点击地图或列表中的车辆查看</span></div>
+  </div>
+</div>
+<script src="status.js"></script>
+<script src="alarm.js"></script>
+<script>
+"use strict";
+// ---------- 状态分类 ----------
+const STC={1:"idle",2:"run",4:"idle",5:"pause",6:"run",7:"chg",8:"run",9:"chg",
+63:"run",67:"run",68:"run",69:"run",70:"chg",116:"pause",120:"run",151:"run",
+245:"pwr",246:"pwr",247:"pwr",248:"pwr"};
+const stInfo=s=>{const nm=(window.ST_FULL&&ST_FULL[s])||"状态 "+s;
+  let c=STC[s];
+  if(!c)c=/(失败|错误|异常|超时|冲突|遇障|不匹配|无法|缺失|丢失|偏大|偏移|摆歪|过低|太低|超限|不可信|未识别|未连接|堵转|偏航|故障|预警|休眠模式|唤醒)/.test(nm)?"err":"unk";
+  return [nm,c];};
+const CATC={run:"#3fb950",idle:"#1f6feb",chg:"#d29922",pause:"#0e7490",pwr:"#a371f7",err:"#f85149",unk:"#57606a"};
+// ---------- 地图节点类型(浅色底图配色,参照 MonitorClient) ----------
+const NT={0:["储位","#58a6ff"],1:["储位","#58a6ff"],10:["工作区","#bc8cff"],11:["充电区","#e8a723"],20:["缓冲区","#3fb950"],
+55:["巷道存储","#9e6a3d"],15:["自动门","#a371f7"],16:["路径点","#8fa3b8"],19:["暂住区","#39c5cf"],
+22:["提升机交换区","#e85aad"],52:["电梯等待点","#cf222e"],56:["节点56","#64748b"],13:["节点13","#64748b"],
+[-1]:["未定","#adb5bd"]};
+const MAPS=["EE","BB","CC","DD"];
+const MAP_NAMES={EE:"二厂1楼",BB:"二厂3楼",CC:"二厂2楼",DD:"钻房1楼"};
+const POLL_GUESS=250;   // 首帧前的推送间隔猜测（RCS 引擎实测 ~208ms）
+
+// ---------- 状态 ----------
+let map=null, sel=null, agvs=new Map();
+let view={x:0,y:0,s:1}, drag=null;
+const cv=document.getElementById("cv"), ctx=cv.getContext("2d");
+const $=id=>document.getElementById(id);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+// ---------- 地图加载 ----------
+async function loadMap(qr){
+  const r=await fetch("maps/"+qr+".json"); const m=await r.json();
+  m.nodeMap={}; m.nodes.forEach(n=>m.nodeMap[n[0]]=n);
+  m.adj={}; m.edges.forEach(([a,b])=>{(m.adj[a]??=[]).push(b);(m.adj[b]??=[]).push(a);});
+  const xs=m.nodes.map(n=>n[1]), ys=m.nodes.map(n=>n[2]);
+  m.bbox=[Math.min(...xs),Math.min(...ys),Math.max(...xs),Math.max(...ys)];
+  map=m; fitView(); drawLegend();
+}
+// 断帧补间不许斜穿:两端吸附最近节点,中间沿边走 BFS 最短路(路网全是直角边);
+// 反折消除:删掉所有「进去又出来」的节点(先倒回节点再前进 / 冲过节点再退回目标),
+// 保证折线每一段都朝终点方向走--这是"小车绝不往回走"的几何基础
+function snapNode(x,y){let b=null,bd=1e18;for(const n of map.nodes){const d=(n[1]-x)**2+(n[2]-y)**2;if(d<bd){bd=d;b=n;}}return b;}
+const dot3=(p,q,r)=>(q[0]-p[0])*(r[0]-q[0])+(q[1]-p[1])*(r[1]-q[1]);
+function graphRoute(x0,y0,x1,y1){
+  const A=snapNode(x0,y0),B=snapNode(x1,y1);
+  if(!A||!B)return[[x0,y0],[x1,y1]];
+  let tx=x1,ty=y1;
+  if(Math.hypot(B[1]-x1,B[2]-y1)>0.55){tx=B[1];ty=B[2];}   // 目标不在路上(地图版本落后):收到最近节点
+  const seq=[[x0,y0],[A[1],A[2]]];
+  if(A[0]!==B[0]){
+    const prev={},q=[A[0]];prev[A[0]]=null;
+    while(q.length){const c=q.shift();if(c===B[0])break;
+      for(const nb of(map.adj[c]||[]))if(!(nb in prev)){prev[nb]=c;q.push(nb);}}
+    if(!(B[0] in prev))return[[x0,y0],[tx,ty]];   // 极个别不连通:退回直线
+    const hops=[];for(let c=B[0];c!==A[0];c=prev[c])hops.push([map.nodeMap[c][1],map.nodeMap[c][2]]);
+    seq.push(...hops.reverse());
+  }
+  seq.push([tx,ty]);
+  // 起点落在 A→第一跳 的路段中间:砍吸附节点,起点直接汇入(否则先倒回节点再出发,产生垂直尖刺)
+  if(seq.length>2){
+    const ax=seq[1],h0=seq[2],ex=h0[0]-ax[0],ey=h0[1]-ax[1],L2=ex*ex+ey*ey||1e-9;
+    const ux=x0-ax[0],uy=y0-ax[1],cr=Math.abs(ux*ey-uy*ex),dt2=ux*ex+uy*ey;
+    if(cr*cr<0.0025*L2&&dt2>0&&dt2<L2)seq.splice(1,1);
+  }
+  for(let i=1;i<seq.length-1;)                  // 反折消除:前后段反向的节点删掉直连
+    if(dot3(seq[i-1],seq[i],seq[i+1])<-0.01)seq.splice(i,1);else i++;
+  for(let i=1;i<seq.length;i++)                 // 去重(起点≈吸附点等)
+    if(Math.hypot(seq[i][0]-seq[i-1][0],seq[i][1]-seq[i-1][1])<0.05){seq.splice(i,1);i--;}
+  return seq;
+}
+function fitView(){
+  if(!cv.width)resize();
+  const[bx0,by0,bx1,by1]=map.bbox, W=cv.width/dpr, H=cv.height/dpr, pad=40;
+  // cover:铺满画布(地图竖、视口横时不再缩成一小块),溢出部分拖动查看
+  const s=Math.max((W-2*pad)/Math.max(bx1-bx0,1),(H-2*pad)/Math.max(by1-by0,1));
+  view={s,x:W/2-(bx0+bx1)/2*s,y:H/2+(by0+by1)/2*s};
+}
+function drawLegend(){
+  const types=[...new Set(map.nodes.map(n=>n[3]))].sort((a,b)=>a-b);
+  const seen=new Set(), items=[];
+  for(const t of types){const[nm,c]=NT[t]||["类型"+t,"#64748b"];const k=nm+"|"+c;
+    if(!seen.has(k)){seen.add(k);items.push(`<span><span class="dot" style="background:${c}"></span>${nm}</span>`);}}
+  $("legend").innerHTML=items.join("")
+   +`<span><span class="dot" style="background:#3fb950"></span>运行</span>
+     <span><span class="dot" style="background:#1f6feb"></span>空闲</span>
+     <span><span class="dot" style="background:#d29922"></span>充电</span>
+     <span><span class="dot" style="background:#f85149"></span>异常</span>
+     <span><span class="dot" style="background:#57606a"></span>失联</span>
+     <span><span class="dot" style="background:#a371f7"></span>待机/休眠</span>
+     <span style="color:#1f6feb">- 行进轨迹(至最新上报)</span>
+     <span style="color:#f7941d">- 近车段(&le;2m)</span>`;
+}
+
+// ---------- 数据轮询 ----------
+function ingest(a,old,now){                        // 单帧处置:可信度分层 → 采纳/停等/弃用(从 poll 抽出便于单测)
+  if(!old){a.x=a.tx;a.y=a.ty;a.ang=-(+a.robotDir||0)*Math.PI/180;a.s=0;a.v=0;a.turn=null;a.pushT=now;
+    a._frozenN=0;a._posTick=now;                    // 帧过滤基线
+    a.online=a.online!==false;                     // 服务器 online 字段(实测 A6)优先,缺省在线
+    setRoute(a,a.pathPts,[a.tx,a.ty]);
+    return;}
+  // 继承动画状态:帧被过滤时不重建线,poly/s/sEnd 原样保留 → 车停在线上,绝不斜穿/漂移
+  a.x=old.x;a.y=old.y;a.ang=old.ang;a.v=old.v;a.turn=old.turn;
+  a.poly=old.poly;a.cum=old.cum;a.corners=old.corners;a.s=old.s;a.sEnd=old.sEnd;a.vCyc=old.vCyc;
+  a.pushT=old.pushT;a._frozenN=old._frozenN;a._posTick=old._posTick;a._gap=old._gap;
+  a._lx=old._lx;a._ly=old._ly;
+  a.online=a.online!==false;
+  // ---- 帧过滤:坐标可信度分层(导航软件 GPS 丢帧处理:重复帧→停等;异常跳变→弃坐标;正常→采纳) ----
+  const noPath=!(a.pathPts&&a.pathPts.length>=2);
+  if(a.tx===old.tx&&a.ty===old.ty){              // 坐标与上帧完全一致:真停着或RSSI丢包重发--停等,不漂移
+    a._frozenN=(old._frozenN||0)+1;
+    if(noPath&&a._frozenN>=2&&old.poly)setRoute(a,[],null);   // 任务完成坐标不再变→清残线
+  }else{
+    a._frozenN=0;
+    const step=Math.hypot(a.tx-old.tx,a.ty-old.ty);
+    const dtMs=Math.max(now-(old._posTick||now-POLL_GUESS),100);
+    if(step/dtMs*1000<=2.5){                    // 步速≤2.5m/s(>物理极限→异常采样,弃坐标不拽车)
+      a._posTick=now;
+      a._gap=old._gap?old._gap*0.7+dtMs*0.3:dtMs;              // 实测推送间隔 EMA
+      const cyc=Math.max(dtMs/1000*0.8,0.12);                  // 本帧周期→vCyc=实测均速
+      if(!noPath){setRoute(a,a.pathPts,[a.tx,a.ty],cyc);}
+      else{                                     // 无历史轨迹但坐标在走:两点贴路追踪线(丢 path 也能显示追踪)
+        const q=[[old._lx??a.x,old._ly??a.y],[a.tx,a.ty]];
+        if(Math.hypot(q[1][0]-q[0][0],q[1][1]-q[0][1])>0.15)setRoute(a,q,[a.tx,a.ty],cyc);
+        else setRoute(a,[],null);               // 坐标没怎么动且无线:清残线缓动收拢
+      }
+      a._lx=a.tx;a._ly=a.ty;a.pushT=now;        // pushT=本帧采纳时刻(追帧窗口基准)
+    }
+  }
+}
+
+// ---------- 实时事件(SSE: RCS 6990 推送 + 8790 告警) ----------
+const alarms=[];                          // 最新在前，guid 去重
+function ownerOf(m){                      // 告警归属车：AlarmSource/AlarmParam1 纯数字=robotCode；SN_ECS=车序列号(无映射表,显示短码)
+  if(/^\d+$/.test(m.src||""))return m.src;
+  if(/^\d+$/.test(m.p1||""))return m.p1;
+  return m.p1||"";
+}
+function handle(m){                       // 单条事件→agvs/告警面板 (仅当前地图；跨图车辆/告警=噪声，源头丢弃)
+  if(m.e==="alarm"){                      // 告警处理（噪声三道闸门在 handleAlarm）
+    if(m.stat!=="1"){                                 // 已恢复：先于一切过滤按 guid 清活动项
+      const k=alarms.findIndex(z=>z.guid===m.guid);
+      if(k>=0){alarms.splice(k,1);renderAlarms();}
+      return;
+    }
+    handleAlarm(m); return;
+  }
+  if(m.map&&m.map!==curMap)return;
+  if(m.e==="status"&&m.a.mapCode&&m.a.mapCode!==curMap)return;
+  const now=Date.now();
+  if(m.e==="status"){
+    const a=Object.assign({},m.a);
+    a.tx=+a.posX/1000; a.ty=+a.posY/1000;             // mm->m 最新上报位置
+    if(!isFinite(a.tx)||!isFinite(a.ty))return;        // 坏帧:坐标缺失/NaN,整条丢弃,不污染动画
+    a.pathPts=(!a.path||!a.path.length?(agvs.get(a.robotCode)||{}).path:a.path)
+      ?.map(p=>{try{const[x,y]=JSON.parse(p);return[x/1000,y/1000];}catch(e){return null;}})
+      .filter(p=>p&&isFinite(p[0])&&isFinite(p[1]))||[];   // 推送 status 偶带空 path→沿用上拍 ROBOT_PATH
+    a.timestamp=now;                                       // 推送无时间戳，以到达时刻代
+    ingest(a,agvs.get(a.robotCode),now);
+    a._seen=now; agvs.set(a.robotCode,a);
+    return;
+  }
+  if(m.e==="path"){
+    const a=agvs.get(m.id); if(a) a.path=m.path;      // 路线快照(status.path 空时用最新这条)
+    return;
+  }
+  if(m.e==="offline"){
+    for(const id of m.ids){const a=agvs.get(id);if(a)a.online=false;}
+    return;
+  }
+}
+function handleAlarm(m){                  // 活动告警四道闸门，过不了=噪声，直接丢：
+  if(m.map&&m.map!==curMap)return;        // 非当前地图
+  const own=ownerOf(m);
+  if(!/^\d+$/.test(own))return;           // 归属不是车号(SN序列码/平台级)=对人无意义
+  const db=(window.ALARM_DB||{})[m.mt];
+  if(!(db&&db.sub[m.st]))return;          // 字典译不出中文=无意义
+  if(Date.now()-new Date(m.time.replace(" ","T"))>864e5)return;  // >24h 僵尸告警(重连回放)不配占面板
+  m.txt=db.sub[m.st].n; m._own=own;
+  if(!alarms.some(z=>z.guid===m.guid))alarms.unshift(m);         // guid 去重(server 重连会重放)
+  if(alarms.length>60)alarms.length=60;
+  renderAlarms();
+}
+function sseConnect(){
+  const es=new EventSource("/api/events");
+  esT.es=es;
+  es.onmessage=e=>{esT.last=Date.now();try{handle(JSON.parse(e.data));$("msg").style.display="none";}catch(err){}};
+  es.onopen=()=>{esT.last=Date.now();$("src").textContent="推送";};
+  es.onerror=()=>{$("src").textContent="断线";es.close();setTimeout(sseConnect,2000);};   // 只重连本机 server；RCS 断线由 server 重登重连
+}
+const esT={last:0,es:null};
+function renderAlarms(){
+  const el=$("alarms"); if(!el)return;
+  const per={}, top=[];
+  for(const a of alarms){                                  // 每台车最近 2 条（alarms 已最新在前）
+    const k=a._own||"?";
+    if((per[k]=per[k]||0)>=2)continue;
+    per[k]++; top.push(a);
+  }
+  el.innerHTML=top.length?`<h2>活动告警</h2>`+top.map(a=>{const c=a.lvl>=3?"err":a.lvl==2?"warn":"";
+    const who=/^\d+$/.test(a._own)?`#${a._own}`:(a._own?a._own.slice(0,12):a.map||"系统");
+    return `<div class="row"><span class="rinfo"><span class="st"><span class="badge ${c}">⚠</span> ${who}：${a.txt}</span><br><span style="opacity:.7">${a.time||""}${a.map?" · "+a.map:""}</span></span></div>`;}).join(""):"";
+}
+
+function feedTick(){                        // 1s UI 节拍：存活标记+列表/详情刷新。无任何网络请求
+  if(!map)return;
+  const now=Date.now();
+  for(const a of agvs.values()) if(now-a._seen>8000) a.online=false;   // 8s 无推送=引擎会话断(server 正在重登重连)
+  $("lastOk").textContent="更新于 "+new Date(now).toLocaleTimeString();
+  renderList(); renderDetail();
+}
+setInterval(feedTick,1000);
+setInterval(renderAlarms,30000);                        // 30s 让"告警时间"文案刷新
+
+// ---------- 渲染 ----------
+const dpr=window.devicePixelRatio||1;
+function resize(){const st=$("stage");   // 画布后备尺寸必须等于 stage 实际尺寸;canvas 默认 300px 宽,
+  cv.width=st.clientWidth*dpr;cv.height=st.clientHeight*dpr;}  // 不显式调用就永远不初始化
+resize();
+addEventListener("resize",()=>{resize();if(map)fitView();});
+function P(mx,my){return[mx*view.s+view.x,-my*view.s+view.y]} // 地图米 -> 屏幕px
+
+// ---------- 导航式运动(map matching + dead reckoning,仿高德/腾讯小车平滑移动) ----------
+// 折线=道路真值,车=折线上的弧长进度 s,车头=折线切向量;上报坐标只做初始落位,永不拽车跳点。
+function buildPoly(a,raw){                         // 先把线贴路净化(斜段沿路网 BFS 绕),再建弧长表/转弯点
+  const pts=[];
+  for(const p of raw){
+    if(!pts.length){pts.push(p);continue;}
+    const q=pts[pts.length-1];
+    if(Math.hypot(p[0]-q[0],p[1]-q[1])<0.08)continue;             // 重合点
+    if(map&&Math.abs(p[0]-q[0])>0.12&&Math.abs(p[1]-q[1])>0.12)   // 斜段→贴路绕
+      pts.push(...graphRoute(q[0],q[1],p[0],p[1]).slice(1));
+    else pts.push(p);}
+  a.poly=pts;a.cum=[0];a.corners=[];a.s=0;a.turn=null;
+  for(let i=1;i<pts.length;i++)
+    a.cum[i]=a.cum[i-1]+Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]);
+  for(let i=1;i<pts.length-1;i++){                 // 顶点拐向>45°=需旋转;>135°=掉头,限速更低
+    const d1=Math.atan2(-(pts[i][1]-pts[i-1][1]),pts[i][0]-pts[i-1][0]);
+    const d2=Math.atan2(-(pts[i+1][1]-pts[i][1]),pts[i+1][0]-pts[i][0]);
+    let dd=d2-d1;while(dd>Math.PI)dd-=2*Math.PI;while(dd<-Math.PI)dd+=2*Math.PI;
+    const ax=Math.abs(dd);
+    if(ax>Math.PI/4)a.corners.push({s:a.cum[i],to:d2,hit:false,cap:ax>2.35?0.1:0.25});
+  }
+  return pts;
+}
+function posAt(a){                                 // 弧长→{位置,切向车头角,当前段终点下标}
+  if(a.poly.length<2)return{x:a.poly[0][0],y:a.poly[0][1],ang:a.ang,i:1};
+  let i=1;while(i<a.cum.length-1&&a.s>=a.cum[i])i++;
+  const d=Math.max(a.cum[i]-a.cum[i-1],1e-9),u=clamp((a.s-a.cum[i-1])/d,0,1),p=a.poly;
+  return{x:p[i-1][0]+(p[i][0]-p[i-1][0])*u,y:p[i-1][1]+(p[i][1]-p[i-1][1])*u,
+        ang:Math.atan2(-(p[i][1]-p[i-1][1]),p[i][0]-p[i-1][0]),i};
+}
+function setRoute(a,np,T,cyc){                     // 新推送:线头锚车头、线尾按需贴路延展;s 只增不减
+  if(!np||np.length<2){a.poly=null;a.turn=null;return;}   // path 清空(任务收尾)≠定位丢失:缓动收拢
+  // 停等仲裁:上报点在旧线上位于车头之后(滞后帧重放/车真在倒退)→ 车原地停等真实车,
+  // 线不重建、s 不回走(结构上杜绝"往回走";车倒退入库等场景由停等+任务收尾缓动兜底)
+  if(a.poly&&a.poly.length>1&&T&&projLen(T[0],T[1],a.poly,a.cum)[0]<a.s-0.05){
+    a.sEnd=a.s;a.vCyc=0;return;}
+  const cum=[0];for(let i=1;i<np.length;i++)
+    cum[i]=cum[i-1]+Math.hypot(np[i][0]-np[i-1][0],np[i][1]-np[i-1][1]);
+  const[t1]=projLen(a.x,a.y,np,cum);               // 车头在轨迹上的进度
+  const npExhausted=t1>=cum[cum.length-1]-0.02;   // 车头已到/越过轨迹尾:历史全部在身后,不再回头拾取节点
+  const pts=[[a.x,a.y]];
+  if(!npExhausted)for(let i=0;i<np.length;i++)
+    if(cum[i]>=t1-0.02&&Math.hypot(np[i][0]-pts.at(-1)[0],np[i][1]-pts.at(-1)[1])>0.08)pts.push(np[i]);
+  if(T&&map){                                      // 航位推算兜底(导航软件隧道模式):
+    const[tT]=projLen(T[0],T[1],np,cum),tl=pts.at(-1);   // 上报点越过轨迹尾(path 冻结/截断但车在走)
+    if(tT>=cum[cum.length-1]-0.05&&Math.hypot(T[0]-tl[0],T[1]-tl[1])>0.25){   // → 沿路网延展线尾到上报点
+      const B=snapNode(T[0],T[1]);
+      if(B)pts.push(...graphRoute(tl[0],tl[1],T[0],T[1]).slice(1));   // 上报点离路(地图版本差)→ graphRoute 内收到最近节点
+    }
+    if(pts.length<2)                                 // 轨迹整体在车后:车头贴路直连上报点
+      pts.push(...graphRoute(a.x,a.y,T[0],T[1]).slice(1));
+  }
+  if(pts.length<2){a.poly=null;a.turn=null;return;}
+  buildPoly(a,pts);
+  a.s=projLen(a.x,a.y,a.poly,a.cum)[0];           // s 从车头投影续走
+  const sT=T?projLen(T[0],T[1],a.poly,a.cum)[0]:a.s; // 本周期目标=上报位置投影(实测车真实到过这)
+  a.sEnd=Math.max(sT,a.s);                        // s 只增不减 → 结构上不可能往回走
+  a.vCyc=clamp((a.sEnd-a.s)/Math.max(cyc||(a._gap||POLL_GUESS)/1000*0.8,0.12),0,2);   // 均速按真实推送间隔(EMA)
+}
+function projLen(px,py,np,cum){                    // 点到折线最近点→[弧长,垂距](投影/延展判定/停等仲裁共用)
+  let d=1e18,t=0;
+  for(let i=1;i<np.length;i++){const ax=np[i-1][0],ay=np[i-1][1],
+    vx=np[i][0]-ax,vy=np[i][1]-ay,L=vx*vx+vy*vy||1;
+    const u=clamp(((px-ax)*vx+(py-ay)*vy)/L,0,1);
+    const dd=Math.hypot(px-(ax+vx*u),py-(ay+vy*u));
+    if(dd<d){d=dd;t=cum[i-1]+u*Math.sqrt(L);}}
+  return[t,d];
+}
+function resolveHead(tang,dir){                    // 车头仲裁:真实 robotDir vs 运动切向 → [显示角,是否倒行]
+  if(dir==null||dir==="")return[tang,false];       // 无方向数据:随线走
+  const rd=-(+dir)*Math.PI/180;
+  let dd=rd-tang;while(dd>Math.PI)dd-=2*Math.PI;while(dd<-Math.PI)dd+=2*Math.PI;
+  return Math.abs(dd)<0.6?[rd,false]:Math.abs(dd)>2.6?[rd,true]:[tang,false];   // 同向/反向/侧向不可信
+}
+
+let lastT=performance.now();
+function frame(t){
+  requestAnimationFrame(frame);
+  if(!map)return;
+  const dt=Math.min((t-lastT)/1000,0.25); lastT=t;
+  // 弧长推进:s+=v*dt;转弯点命中→s 冻结在角点,车头按角速度转向切向量
+  for(const a of agvs.values()){
+    if(!a.poly||a.poly.length<2){                 // 无任务:向上报真实位置缓动收拢(path 清空≠位置失效)
+      const e=Math.min(dt*2,1);a.x+=(a.tx-a.x)*e;a.y+=(a.ty-a.y)*e;
+      if(!a.turn){const wa=-(+a.robotDir||0)*Math.PI/180;
+        let da=wa-a.ang;while(da>Math.PI)da-=2*Math.PI;while(da<-Math.PI)da+=2*Math.PI;
+        a.ang+=da*Math.min(dt*4,1);}
+      a.v=0;continue;
+    }
+    if(a.turn){                                   // 路口原地旋转动画:位置冻结,车头从入射轴转向出射轴
+      a.turn.t-=dt;
+      let da=a.turn.to-a.ang;while(da>Math.PI)da-=2*Math.PI;while(da<-Math.PI)da+=2*Math.PI;
+      const step=Math.abs(da)<=dt*9?da:Math.sign(da)*dt*9;
+      a.ang+=step;da-=step;
+      if(a.turn.t<=0||Math.abs(da)<0.02){a.ang=a.turn.to;a.turn=null;}
+      continue;
+    }
+    // 目标速度=本周期实测均速 vCyc;迟到追帧保底基于本帧采纳时刻(防定时器漂移误判迟到导致加速冲刺)
+    let vT=a.sEnd>a.s+0.02?a.vCyc:0;
+    if(vT>0&&a.pushT){const tl=(a._gap||POLL_GUESS)/1000*0.8-(Date.now()-a.pushT)/1000;
+      if(tl<0.3&&a.sEnd-a.s>0.05)vT=Math.max(vT,(a.sEnd-a.s)/Math.max(tl,0.1));}   // 追帧窗口随实测推送节奏
+    vT=Math.min(vT,2);
+    const nc=a.corners.find(c=>!c.hit&&c.s>a.s);   // 进弯前 0.5m 线性减速到顶点限速(cap)
+    if(nc&&nc.s-a.s<0.5)vT=Math.min(vT,Math.max(0.05,vT)*clamp((nc.s-a.s)/0.5,0,1)+nc.cap*(1-clamp((nc.s-a.s)/0.5,0,1)));
+    const endD=a.sEnd-a.s;                          // 出弯或到终点前同样收油
+    if(endD<0.5)vT=Math.min(vT,Math.max(0.03,endD/0.5*vT));
+    const acc=(vT>a.v?1.2:1.8)*dt;
+    a.v=Math.abs(vT-a.v)<=acc?vT:a.v+Math.sign(vT-a.v)*acc;
+    a.s=Math.min(a.sEnd,a.s+a.v*dt);
+    const c=a.corners.find(c=>!c.hit&&c.s<=a.s+1e-6);     // 刚跨过的转弯点
+    if(c){a.s=c.s;const p=posAt(a);a.x=p.x;a.y=p.y;a.v=0; // 冻结角点,车头从入射轴原地旋到出射轴
+      c.hit=true;a.turn={t:0.35,to:c.to};continue;}
+    const p=posAt(a);a.x=p.x;a.y=p.y;
+    const[th,rev]=resolveHead(p.ang,a.robotDir);   // 车头=真实朝向；与切向反向→倒行（位置仍沿 s 前进）
+    a._rev=rev;
+    let hda=th-a.ang;while(hda>Math.PI)hda-=2*Math.PI;while(hda<-Math.PI)hda+=2*Math.PI;
+    const hw=dt*10;                                 // 车头缓动 10rad/s（90°≈0.16s）：转弯被推送打断/倒行切换均不瞬跳
+    a.ang+=Math.abs(hda)<=hw?hda:Math.sign(hda)*hw;
+  }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.fillStyle="#eef1f5";ctx.fillRect(0,0,cv.width/dpr,cv.height/dpr);
+  // 边(道路:白线,仿客户端)
+  ctx.strokeStyle="#ffffff";ctx.lineWidth=clamp(view.s*0.09,1.2,4);ctx.lineCap="round";
+  ctx.beginPath();
+  for(const[na,nb]of map.edges){
+    const A=map.nodeMap[na],B=map.nodeMap[nb];
+    const[ax,ay]=P(A[1],A[2]),[bx,by]=P(B[1],B[2]);
+    ctx.moveTo(ax,ay);ctx.lineTo(bx,by);
+  }
+  ctx.stroke();
+  // 节点:路径点小空心圆,功能区大色点
+  for(const[id,mx,my,tp]of map.nodes){
+    const[px,py]=P(mx,my);
+    if(px<-20||py<-20||px>cv.width/dpr+20||py>cv.height/dpr+20)continue;
+    if(tp===16){ctx.fillStyle="#fff";ctx.strokeStyle="#8fa3b8";ctx.lineWidth=1;
+      ctx.beginPath();ctx.arc(px,py,2.2,0,7);ctx.fill();ctx.stroke();}
+    else{ctx.fillStyle=NT[tp]?.[1]||"#64748b";
+      const q=Math.min(3+view.s*0.02,8);           // 功能点=方形(同客户端空心方块语义)
+      ctx.fillRect(px-q,py-q,q*2,q*2);
+      ctx.strokeStyle="#ffffff";ctx.lineWidth=1.5;ctx.strokeRect(px-q,py-q,q*2,q*2);}
+  }
+  for(const a of agvs.values()){
+    if(a.mapCode&&a.mapCode!==map.qr)continue;
+    const cat=stInfo(a.status)[1], col=CATC[cat]||CATC.unk;
+    const[px,py]=P(a.x,a.y);
+    // 剩余线 = a.poly 从车头弧长 s 起的尾段(buildPoly 已保证逐段贴路)
+    const pts=a.poly&&a.poly.length>1?[[a.x,a.y],...a.poly.slice(posAt(a).i)]:[];
+    if(pts.length>1){
+      const W=(sel===a.robotCode)?3:2;
+      const polyline=color=>{
+        ctx.strokeStyle=color;ctx.lineWidth=W;ctx.beginPath();
+        const[x0,y0]=P(pts[0][0],pts[0][1]);ctx.moveTo(x0,y0);
+        for(const[x,y]of pts.slice(1)){const[qx,qy]=P(x,y);ctx.lineTo(qx,qy);}
+        ctx.stroke();
+      };
+      polyline(sel===a.robotCode?"#1f6feb":"#1f6feb99");
+      ctx.lineCap="round";
+      for(let i=0;i<pts.length-1;i++){
+        if(Math.hypot(pts[i][0]-a.x,pts[i][1]-a.y)>2||
+           Math.hypot(pts[i+1][0]-a.x,pts[i+1][1]-a.y)>2)continue;
+        ctx.strokeStyle="#f7941d";ctx.lineWidth=W;ctx.beginPath();
+        const[x1,y1]=P(pts[i][0],pts[i][1]),[x2,y2]=P(pts[i+1][0],pts[i+1][1]);
+        ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+      }
+      ctx.lineCap="butt";
+    }
+    drawAgv(a,px,py,col);
+  }
+}
+// 橙色车(同 MonitorClient),尺寸按实车 780x545mm 随地图缩放
+function drawAgv(a,px,py,col){
+  const off=a.online===false;                        // 失联:位置冻结在最后可信点,灰显+呼吸提示
+  if(off)col="#57606a";
+  const l=clamp(0.78*view.s,15,140),w=l*545/780;
+  ctx.save();ctx.translate(px,py);
+  if(off)ctx.globalAlpha=0.55+0.25*Math.sin(performance.now()/400);
+  // 状态色底盘光环(车身恒橙色,状态靠光环颜色;选中橙色)
+  ctx.fillStyle=sel===a.robotCode?"#f7941d55":col+"44";
+  ctx.beginPath();ctx.arc(0,0,l*0.95,0,7);ctx.fill();
+  ctx.rotate(a.ang+Math.PI);   // ang=屏幕角;车头画在 -x 端
+  // 阴影
+  ctx.fillStyle="#00000026";rr(-l/2+1.5,-w/2+2,l,w,w*0.3);ctx.fill();
+  // 橙色车身 + 深棕描边
+  ctx.fillStyle="#F7941D";ctx.strokeStyle="#8B4A00";ctx.lineWidth=2;
+  rr(-l/2,-w/2,l,w,w*0.3);ctx.fill();ctx.stroke();
+  // 左侧暗带/底部亮带(同客户端 online.png 伪立体)
+  ctx.save();rr(-l/2,-w/2,l,w,w*0.3);ctx.clip();
+  ctx.fillStyle="#F26F21";ctx.fillRect(-l/2,-w/2,l*0.09,w);
+  ctx.fillStyle="#FDB913";ctx.fillRect(-l/2,w/2-l*0.07,l,l*0.07);
+  ctx.restore();
+  // 前端深色端(车头/载货端)
+  ctx.fillStyle="#7A4B00";rr(-l/2+l*0.04,-w*0.26,l*0.13,w*0.52,3);ctx.fill();
+  if(a.podCode){          // 货架:车长40%(+20%),方向按 podDir 独立旋转(棕色端=货架前方)
+    const ps=l*0.4;
+    ctx.save();ctx.rotate(-(+(a.podDir||0))*Math.PI/180-a.ang);
+    ctx.fillStyle="#b8bec6";ctx.strokeStyle="#6e7681";ctx.lineWidth=1.6;
+    rr(-ps/2,-ps/2,ps,ps,2.5);ctx.fill();ctx.stroke();
+    ctx.fillStyle="#7A4B00";rr(-ps/2+ps*0.06,-ps*0.22,ps*0.18,ps*0.44,1.5);ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+  // 编号徽标(上)+ 货架徽标(下)
+  badge("#"+a.robotCode+(off?"·失联":""),px,py-w-6,"#0d1117",off?"#f85149":col);
+  if(a.podCode)badge("📦 "+a.podCode,px,py+w+14,"#0d1117","#e6edf3");
+  if(a.stop==="1"||a.exclType==="1")
+    badge(a.stop==="1"?"暂停":"排除",px+l*0.75,py-w*0.9,"#5a3200","#ffd33d");   // 修:原 y=-w*0.9 画到画布顶端外
+  if(a._rev)badge("倒行",px-l*0.75,py-w*0.9,"#5a3200","#ffd33d");   // 倒行:车头背向目的地,位置仍沿 s 前进
+}
+function badge(txt,x,y,bg,fg){
+  ctx.font="bold 13px Consolas,'Microsoft YaHei',monospace";ctx.textAlign="center";
+  const w=ctx.measureText(txt).width+10;
+  ctx.fillStyle=bg;rr(x-w/2,y-9,w,18,5);ctx.fill();
+  ctx.fillStyle=fg;ctx.fillText(txt,x,y+4);ctx.textAlign="left";
+}
+function rr(x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r);}
+function tri(x,y,s){ctx.beginPath();ctx.moveTo(x+s,y);ctx.lineTo(x,y-s*0.6);ctx.lineTo(x,y+s*0.6);ctx.closePath();ctx.fill();}
+requestAnimationFrame(frame);
+
+// ---------- 交互 ----------
+let curMap=new URLSearchParams(location.search).get("map")||"BB";
+$("mapSel").innerHTML=MAPS.map(m=>`<option value="${m}" ${m===curMap?"selected":""}>${m} ${MAP_NAMES[m]}</option>`).join("");
+$("mapSel").onchange=e=>{curMap=e.target.value;agvs.clear();sel=null;loadMap(curMap);renderList();renderDetail();};
+loadMap(curMap).then(()=>sseConnect()).catch(e=>{const m=$("msg");m.style.display="block";m.textContent="地图加载失败:"+e.message;});   // 地图就绪后再连事件流
+$("sync").onclick=async()=>{
+  const b=$("sync");b.disabled=true;b.textContent="⟳ 同步中...";
+  try{
+    const r=await fetch("/api/syncMaps",{method:"POST"});
+    const j=await r.json();
+    b.textContent=j.err?("⚠ "+j.err.slice(0,30)):"✓ 已同步 "+Object.keys(j.ok).length+" 图";
+    await loadMap(curMap);                       // 重新拉取当前图 JSON
+  }catch(e){b.textContent="⚠ 同步失败";}
+  setTimeout(()=>{b.disabled=false;b.textContent="⟳ 同步地图";},4000);
+};
+cv.onwheel=e=>{e.preventDefault();
+  const f=e.deltaY<0?1.15:1/1.15, [mx,my]=[e.offsetX,e.offsetY];
+  view.x=mx-(mx-view.x)*f; view.y=my-(my-view.y)*f; view.s*=f;};
+let downXY=null;                                   // 拖地图误触保护:位移>5px 不算点击
+cv.onmousedown=e=>{downXY=[e.offsetX,e.offsetY];drag=[e.offsetX,e.offsetY,cv.style.cursor="grabbing"];};
+onmouseup=()=>{drag=null;cv.style.cursor="";};
+cv.onmousemove=e=>{
+  if(drag){view.x+=e.offsetX-drag[0];view.y+=e.offsetY-drag[1];drag=[e.offsetX,e.offsetY];}
+  const hit=hitAgv(e.offsetX,e.offsetY), tip=$("tip");
+  if(hit){const[a]=hit;tip.style.display="block";
+    tip.style.left=(e.offsetX+14)+"px";tip.style.top=(e.offsetY+8)+"px";
+    tip.textContent=`#${a.robotCode} ${stInfo(a.status)[0]}\n电量 ${a.battery}%  速度 ${a.speed}mm/s\n货架 ${a.podCode||"无"}`;
+    cv.style.cursor="pointer";}
+  else{tip.style.display="none";cv.style.cursor=drag?"grabbing":"";}
+};
+cv.onclick=e=>{if(downXY&&Math.hypot(e.offsetX-downXY[0],e.offsetY-downXY[1])>5){downXY=null;return;}   // 拖动后不算点击
+  downXY=null;const h=hitAgv(e.offsetX,e.offsetY);sel=h?h[0].robotCode:null;renderList();renderDetail();};
+function hitAgv(px,py){
+  let best=null,bd=18;
+  for(const a of agvs.values()){
+    if(a.mapCode&&a.mapCode!==map.qr)continue;
+    const[x,y]=P(a.x,a.y),d=Math.hypot(x-px,y-py);
+    if(d<bd){bd=d;best=a;}}
+  return best?[best,bd]:null;
+}
+
+// ---------- 侧栏 ----------
+function renderList(){
+  const arr=[...agvs.values()].sort((a,b)=>+a.robotCode-+b.robotCode);
+  const cur=arr.filter(a=>!a.mapCode||a.mapCode===map?.qr);
+  let run=0,idle=0,chg=0,err=0,off=0;
+  for(const a of cur){const c=stInfo(a.status)[1];
+    if(a.online===false){off++;continue;}           // 失联(3 周期无数据/服务器下线):单独计数
+    c==="run"?run++:c==="chg"?chg++:c==="err"?err++:idle++;}
+  $("cRun").textContent=run;$("cIdle").textContent=idle;$("cChg").textContent=chg;$("cErr").textContent=err;$("cOff").textContent=off;
+  $("list").innerHTML=cur.map(a=>{
+    const[nm,c]=stInfo(a.status),bc=+a.battery<20?"low":+a.battery<40?"mid":"";
+    return `<div class="row ${sel===a.robotCode?"sel":""}" data-id="${a.robotCode}">
+      <span class="rid" style="color:${CATC[c]||CATC.unk}">#${a.robotCode}</span>
+      <span class="rinfo"><span class="st">${nm}</span>
+        ${a.podCode?`<span class="badge">📦${a.podCode}</span>`:""}
+        ${a.stop==="1"?`<span class="badge warn">暂停</span>`:""}
+        ${a.exclType==="1"?`<span class="badge err">已排除</span>`:""}
+        ${a.online===false?`<span class="badge err">失联</span>`:""}<br>${(+a.posX/1000).toFixed(1)},${(+a.posY/1000).toFixed(1)}m · ${a.speed}mm/s</span>
+      <span class="bat ${bc}" style="--p:${a.battery}"><i></i><b>${a.battery}%</b></span></div>`;}).join("");
+  document.querySelectorAll(".row[data-id]").forEach(el=>el.onclick=()=>{
+    sel=el.dataset.id;const a=agvs.get(sel);
+    if(a&&map){const[px,py]=P(a.x,a.y),W=cv.width/dpr,H=cv.height/dpr;
+      view.x+=W/2-px;view.y+=H/2-py;}
+    renderList();renderDetail();});
+}
+function renderDetail(){
+  const d=$("detail");
+  const a=sel&&agvs.get(sel);
+  if(!a){d.innerHTML='<span style="color:var(--dim)">点击地图或列表中的车辆查看</span>';return;}
+  const[nm,c]=stInfo(a.status);
+  d.innerHTML=`<table>
+   <tr><td>车辆</td><td>#${a.robotCode}</td></tr>
+   <tr><td>状态</td><td style="color:${CATC[c]||CATC.unk}">${nm}</td></tr>
+   <tr><td>坐标</td><td>${(+a.posX).toFixed(0)}, ${(+a.posY).toFixed(0)} mm</td></tr>
+   <tr><td>朝向</td><td>${a.robotDir}°</td></tr>
+   <tr><td>速度</td><td>${a.speed} mm/s</td></tr>
+   <tr><td>电量</td><td>${a.battery}%</td></tr>
+   <tr><td>货架</td><td>${a.podCode||"-"} ${a.podDir?`(${a.podDir}°)`:""}</td></tr>
+   <tr><td>车 IP</td><td>${a.robotIp||"-"}</td></tr>
+   <tr><td>地图</td><td>${a.mapCode}</td></tr>
+   <tr><td>路线点</td><td>${a.path?.length||0}</td></tr>
+   <tr><td>暂停/排除</td><td>${a.stop}/${a.exclType}</td></tr>
+   <tr><td>时间戳</td><td>${a.timestamp?new Date(a.timestamp).toLocaleTimeString():"-"}</td></tr></table>`;
+}
+</script>
+</body>
+</html>
