@@ -1,7 +1,7 @@
 # MonitorClient ↔ RCS 通讯抓包分析报告
 
-日期：2026-09-11 ｜ 环境：海康 RCS-2000 V3.1.4（`RCS2000-SERVER`，192.0.2.31）+ MonitorClient.exe（`C:\Program Files (x86)\RunMonitor`，pid 17964）
-抓包工具：D:\WiresharkPortable（dumpcap/tshark 3.4.8 + NPcap），网卡 抓包所用内网网卡 + Adapter for loopback
+日期：2026-09-11 ｜ 环境：海康 RCS-2000 V3.1.4（`RCS2000-SERVER`，rcs-ip）+ MonitorClient.exe（`C:\Program Files (x86)\RunMonitor`，pid 17964）
+抓包工具：D:\WiresharkPortable（dumpcap/tshark 3.4.8 + NPcap），网卡 Tailscale(vpn-ip) + Adapter for loopback
 证据目录：`D:\Documents\hermes\agv-web\_capture\`（本文末清单，全部结论可由其中 pcapng + 脚本复现）
 
 ---
@@ -10,7 +10,7 @@
 
 | 轮次 | 文件 | 过滤器 | 时长 | 目的 |
 |---|---|---|---|---|
-| ① | tailscale.pcapng | `host 192.0.2.31 or 192.0.2.39 or 192.0.2.43` | 300s | 全量业务通道 |
+| ① | tailscale.pcapng | `host rcs-ip or mq-ip or engine-ip` | 300s | 全量业务通道 |
 | ② | loopback5905.pcapng | `port 5905` | 300s | MonitorClient 自连回环 |
 | ③ | round2.pcapng | 同① | 200s | 复现性 + 443 对照（期间零人为操作）|
 | ④ | syncA.pcapng + rest_samples.txt | `tcp port 6990` 与 8083 REST 轮询**同时刻** | 60s | 通道间数据同源性定量对比 |
@@ -23,13 +23,13 @@
 
 | # | 地址 | 协议 | 方向/节奏 | 内容 | 定性 |
 |---|------|------|-----------|------|------|
-| A | **TCP 192.0.2.43:6990** | 私有二进制帧+明文XML | 纯下行，每车 **208ms/帧**（60s 内每车 287 帧） | ROBOT_STATUS / ROBOT_PATH / TRP_BLOCK_CELL / BLOCK_CELL / ROBOT_OFFLINE / TASK_INFO_REQ / CHARGE_INFO / VALID_ROBOT_NUM | **主数据通道** |
-| A' | UDP →192.0.2.43:6990 | 自定义 73B | 200ms | `07 00..` + 会话 GUID `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` + 0 填充 | 订阅保活 |
-| B | TCP 192.0.2.43:6989 | 同帧格式 | 1s，76B `..0x4a.."HB"` | 心跳（ASCII "HB"） | 引擎#3 保活 |
-| C | **TCP 192.0.2.31:8790** | 同帧格式 | 下行 | `AlarmMessage` XML（AlarmModule/MainType/SubType/AlarmGuid/AlarmSource=RCS#3(192.0.2.43)/Level/Time） | **告警推送通道** |
-| C' | TCP 192.0.2.31:8789 | 裸 TCP | 1s 零载荷 ACK | 保活 | — |
-| D | TCP 192.0.2.39:5672 | **AMQP 0-9-1**（RabbitMQ） | 0.45msg/s consume+ack + 心跳 | 队列 `exchangeMsg`，Spring JSON 包装，体为 `<row>` XML（dateChg/mapCode/podCode/startX/endX/dstMapCode=任务变更事件） | **第二条数据通道**（任务/货架事件） |
-| E | HTTPS **192.0.2.31:443** | TLS1.2 / nginx 1.20.1 自签(CN=RCS2000-SERVER, 无SNI) | 偶发短会话（300s 抓包仅 9 条，各 ≤200ms；随后 200s 复现窗口 0 条） | 未破解密钥无法读正文；客户端 `param_setup.xml CurMap Port="443"`，且 443 上实测存在 `/rcms/services/rest/clientService/login` | 登录/资源下载，**非监控数据流** |
+| A | **TCP engine-ip:6990** | 私有二进制帧+明文XML | 纯下行，每车 **208ms/帧**（60s 内每车 287 帧） | ROBOT_STATUS / ROBOT_PATH / TRP_BLOCK_CELL / BLOCK_CELL / ROBOT_OFFLINE / TASK_INFO_REQ / CHARGE_INFO / VALID_ROBOT_NUM | **主数据通道** |
+| A' | UDP →engine-ip:6990 | 自定义 73B | 200ms | `07 00..` + 会话 GUID `966CFA4F-2788-47F5-A537-FEB9827F7429` + 0 填充 | 订阅保活 |
+| B | TCP engine-ip:6989 | 同帧格式 | 1s，76B `..0x4a.."HB"` | 心跳（ASCII "HB"） | 引擎#3 保活 |
+| C | **TCP rcs-ip:8790** | 同帧格式 | 下行 | `AlarmMessage` XML（AlarmModule/MainType/SubType/AlarmGuid/AlarmSource=RCS#3(engine-ip)/Level/Time） | **告警推送通道** |
+| C' | TCP rcs-ip:8789 | 裸 TCP | 1s 零载荷 ACK | 保活 | — |
+| D | TCP mq-ip:5672 | **AMQP 0-9-1**（RabbitMQ） | 0.45msg/s consume+ack + 心跳 | 队列 `exchangeMsg`，Spring JSON 包装，体为 `<row>` XML（dateChg/mapCode/podCode/startX/endX/dstMapCode=任务变更事件） | **第二条数据通道**（任务/货架事件） |
+| E | HTTPS **rcs-ip:443** | TLS1.2 / nginx 1.20.1 自签(CN=RCS2000-SERVER, 无SNI) | 偶发短会话（300s 抓包仅 9 条，各 ≤200ms；随后 200s 复现窗口 0 条） | 未破解密钥无法读正文；客户端 `param_setup.xml CurMap Port="443"`，且 443 上实测存在 `/rcms/services/rest/clientService/login` | 登录/资源下载，**非监控数据流** |
 | F | 127.0.0.1:5905 | 裸 TCP 7 连接 | 1B↔1B 单字节 ping-pong | 无业务数据 | 本地组件看门狗，与 RCS 无关 |
 | G | **8083 `/rcms-dps/rest/queryAgvStatus`** | HTTP REST | — | 500s 全量抓包中 **MonitorClient 零流量** | 公开接口，官方客户端**不用** |
 
@@ -62,13 +62,13 @@ ROBOT_STATUS 完整字段：`Id IP Pos(x,y,h) LoadStatus Forklift(ForkHeight,Loa
 
 | 协议 | 地址与路径 | 验证方式 | 状态 |
 |---|---|---|---|
-| HTTP | `POST http://192.0.2.31:8083/rcms-dps/rest/queryAgvStatus`（body `{"reqCode":…,"mapShortName":"CC"}`） | curl 200；无鉴权、无 IP 白名单、无 CORS | ✅ 公开可用 |
-| HTTPS | `https://192.0.2.31:443/rcms/services/rest/clientService/login`（form `ecsUserName/ecsPassword`；明文/md5 均 `resultCode=4`，需专用加密字段） | curl 活测 200 | ✅ 端点存在 |
-| HTTPS | `https://192.0.2.31:443/rcms/web/login/login.action`（302）；`/rcms-dps/*` 在 443 上 404 | curl 活测 | 仅 Web/Struts |
-| TCP | `192.0.2.43:6990`（主推送）/ `192.0.2.43:6989`（HB） | 抓包 + 流重组 | ✅ 私有 XML 帧 |
-| UDP | `192.0.2.43:6990`（GUID 保活，源端口本机随机高端口） | 抓包 | ✅ |
-| TCP | `192.0.2.31:8790`（告警）/ `8789`（HB） | 抓包 | ✅ 同帧格式 |
-| AMQP | `amqp://192.0.2.39:5672` 队列 `exchangeMsg`（rabbitmq-c 客户端） | 抓包 tshark amqp 解码 | ✅ |
+| HTTP | `POST http://rcs-ip:8083/rcms-dps/rest/queryAgvStatus`（body `{"reqCode":…,"mapShortName":"CC"}`） | curl 200；无鉴权、无 IP 白名单、无 CORS | ✅ 公开可用 |
+| HTTPS | `https://rcs-ip:443/rcms/services/rest/clientService/login`（form `ecsUserName/ecsPassword`；明文/md5 均 `resultCode=4`，需专用加密字段） | curl 活测 200 | ✅ 端点存在 |
+| HTTPS | `https://rcs-ip:443/rcms/web/login/login.action`（302）；`/rcms-dps/*` 在 443 上 404 | curl 活测 | 仅 Web/Struts |
+| TCP | `engine-ip:6990`（主推送）/ `engine-ip:6989`（HB） | 抓包 + 流重组 | ✅ 私有 XML 帧 |
+| UDP | `engine-ip:6990`（GUID 保活，源端口本机 60879） | 抓包 | ✅ |
+| TCP | `rcs-ip:8790`（告警）/ `8789`（HB） | 抓包 | ✅ 同帧格式 |
+| AMQP | `amqp://mq-ip:5672` 队列 `exchangeMsg`（rabbitmq-c 客户端） | 抓包 tshark amqp 解码 | ✅ |
 | TCP(预留) | `:8988/:8990` zmq、`http://…/rcs/services/ClientService` SOAP、`/rcms/services/rest/hikRpcService/*`（8181 侧，`genAgvSchedulingTask/bindPodAndBerth/freeRobot/continueTask…`） | 仅二进制字符串 | 配置未启用/本窗口未使用 |
 
 ---
@@ -80,7 +80,7 @@ ROBOT_STATUS 完整字段：`Id IP Pos(x,y,h) LoadStatus Forklift(ForkHeight,Loa
 
 ### 5.2 8083 是否主通道？——**不是。**
 - 500 秒、跨 3 个独立时窗的全量抓包中，MonitorClient 对 8083 **零流量**；它根本不调用这个公开 REST 接口。
-- 主通道是 **TCP 6990（192.0.2.43，调度引擎机）私有推送**，辅以 8790 告警推送 + 5672 AMQP 事件订阅 + UDP/心跳保活。
+- 主通道是 **TCP 6990（engine-ip，调度引擎机）私有推送**，辅以 8790 告警推送 + 5672 AMQP 事件订阅 + UDP/心跳保活。
 - **"443 上的私有协议"不存在**：443 就是 nginx 标准 HTTPS（登录页/Struts/REST clientService + CurMap 资源），TLS 短会话、偶发、无周期监控流；私有协议实际藏在 **6990/8790 明文帧**里，不在 TLS 里。
 
 ### 5.3 agv-web 精度差距归因
@@ -134,8 +134,8 @@ S: 立即开始全量推送（81B 帧头 + XML）
 → **推送引擎的闸门是 IP 级白名单**：任何一次成功的 Web 登录（8181 或 443 `/rcms/web/login/login.action`，后者同参数也 `{"success":true}`）就把本机 IP 登记进 6990 引擎白名单；GUID/UDP 保活/端口对已注册的 IP 不再强制。昨天观察到的"随机 GUID 被拒"全部发生在**官方会话在线期间**——引擎对活动会话有排他逻辑，官方离线（或白名单窗口内）后任意自造 GUID 直连即通。443 的 `clientService/login`（REST，返回 XML resultCode）不是登记入口，Web 登录才是。
 → **结论：完全不需要官方客户端，也不需要破解任何密钥**。独立订阅 = `curl -X POST .../rcms/web/login/login.action`（sha256 密码）+ 随机 GUID 发 ZMTP 握手，两步纯脚本。白名单 TTL 未测定（官方离线数小时后是否失效、登录一次管多久，待长期观察；保守做法：订阅失败时自动重登录再重试）。
 
-**登录密码**：客户端存 login.dat（AES 密文），但**不需要它**——Web 登录直接接受 sha256(明文密码)，现场账号密码由使用方自备，`rcs_push.py` 内置自动登录。明文/md5 被 clientService/login 拒（那是 REST 口，不是登记入口）。
+**登录密码**：客户端存 login.dat（AES 密文），但**不需要它**——Web 登录直接接受 sha256(明文密码)，admin 密码已知，`rcs_push.py` 内置自动登录。明文/md5 被 clientService/login 拒（那是 REST 口，不是登记入口）。
 
-**共存性（已实测坐实，最终版）**：官方在线（6990 ESTABLISHED）期间，脚本独立登录+随机 GUID 并行订阅 60s 收满 1425 帧零断流——引擎对多订阅者无排他。昨天 Tailscale 上"随机 GUID 被拒"的确切原因未定论（候选：该出口 IP 尚未登记进 .43 引擎白名单 / 会话登记时序），已不影响使用：登录在前、订阅在后即稳定可复现。官方重登会换自己的 GUID/UDP 端口（四次观测均不同），与脚本互不影响。
+**共存性（已实测坐实，最终版）**：官方在线（6990 ESTABLISHED）期间，脚本独立登录+随机 GUID 并行订阅 60s 收满 1425 帧零断流——引擎对多订阅者无排他。昨天 Tailscale 上"随机 GUID 被拒"的确切原因未定论（候选：该出口 IP 尚未登记进 .43 引擎白名单 / 会话登记时序），已不影响使用：登录在前、订阅在后即稳定可复现。官方重登会换自己的 GUID/UDP 端口（966CFAF→283C4FAF→2CBC748F→AF4B66BB 四次观测），与脚本互不影响。
 
 **成品**：`D:\Documents\hermes\agv-web\rcs_push.py` —— 纯标准库，`python rcs_push.py CC` 输出 JSONL 实时流（x/y mm、dir、speed、battery、status、path），可直接替换 agv-web 的 5s 轮询。

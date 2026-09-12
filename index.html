@@ -99,13 +99,18 @@ const NT={0:["储位","#58a6ff"],1:["储位","#58a6ff"],10:["工作区","#bc8cff
 55:["巷道存储","#9e6a3d"],15:["自动门","#a371f7"],16:["路径点","#8fa3b8"],19:["暂住区","#39c5cf"],
 22:["提升机交换区","#e85aad"],52:["电梯等待点","#cf222e"],56:["节点56","#64748b"],13:["节点13","#64748b"],
 [-1]:["未定","#adb5bd"]};
-const MAPS=["EE","BB","CC","DD"];
-const MAP_NAMES={EE:"二厂1楼",BB:"二厂3楼",CC:"二厂2楼",DD:"钻房1楼"};
-const POLL_GUESS=250;   // 首帧前的推送间隔猜测（RCS 引擎实测 ~208ms）
+// ---------- 配置（唯一来源 = 后端 GET /api/config，其值定义在项目根 config.py；此处仅为取不到时的兜底） ----------
+let CFG={maps:["EE","BB","CC","DD"],defaultMap:"BB",pollGuessMs:250,
+         mapNames:{EE:"二厂1楼",BB:"二厂3楼",CC:"二厂2楼",DD:"钻房1楼"}};
+// ---------- 引擎节奏常数（与站点环境无关，留在引擎侧） ----------
+let POLL_GUESS=250;        // 首帧前的推送间隔猜测（RCS 引擎实测 ~208ms），由 CFG.pollGuessMs 覆盖
+const RESUME_GAP_S=0.5;    // 帧间隔>此值=页面曾挂起(后台标签/休眠/断点)：本帧只收敛，不追帧
+const SUSPEND_GAP_MS=1500; // 上报间隔>此值=推送曾中断：重置节奏 EMA，避免污染 vCyc 预算
+const RESYNC_DIST=8;       // 积压弧长>此值(m)=渲染确实停过：就地收敛，杜绝长距离冲刺(兜底)
 
 // ---------- 状态 ----------
 let map=null, sel=null, agvs=new Map();
-let view={x:0,y:0,s:1}, drag=null;
+let view={x:0,y:0,s:1}, drag=null, fitS=1;
 const cv=document.getElementById("cv"), ctx=cv.getContext("2d");
 const $=id=>document.getElementById(id);
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
@@ -156,7 +161,15 @@ function fitView(){
   const[bx0,by0,bx1,by1]=map.bbox, W=cv.width/dpr, H=cv.height/dpr, pad=40;
   // cover:铺满画布(地图竖、视口横时不再缩成一小块),溢出部分拖动查看
   const s=Math.max((W-2*pad)/Math.max(bx1-bx0,1),(H-2*pad)/Math.max(by1-by0,1));
+  fitS=s;                                        // 记为 1x 基准，供缩放限位/视角回收使用
   view={s,x:W/2-(bx0+bx1)/2*s,y:H/2+(by0+by1)/2*s};
+}
+function clampView(){                            // 修：缩放限位 + 视角回收，避免滚轮/拖拽把地图丢出屏幕
+  if(!map)return;
+  const W=cv.width/dpr,H=cv.height/dpr,[bx0,by0,bx1,by1]=map.bbox,s=view.s;
+  const spanX=(bx1-bx0)*s,spanY=(by1-by0)*s;
+  view.x=spanX>=W?clamp(view.x,W-bx1*s,-bx0*s):clamp(view.x,-bx0*s,W-bx1*s);   // 屏内横向留白/覆盖规则
+  view.y=spanY>=H?clamp(view.y,H+by0*s,by1*s):clamp(view.y,by1*s,H+by0*s);     // y 轴屏幕反向(y=-my*s+view.y)
 }
 function drawLegend(){
   const types=[...new Set(map.nodes.map(n=>n[3]))].sort((a,b)=>a-b);
@@ -178,7 +191,7 @@ function drawLegend(){
 function ingest(a,old,now){                        // 单帧处置:可信度分层 → 采纳/停等/弃用(从 poll 抽出便于单测)
   if(!old){a.x=a.tx;a.y=a.ty;a.ang=-(+a.robotDir||0)*Math.PI/180;a.s=0;a.v=0;a.turn=null;a.pushT=now;
     a._frozenN=0;a._posTick=now;                    // 帧过滤基线
-    a.online=a.online!==false;                     // 服务器 online 字段(实测 A6)优先,缺省在线
+    a.online=a.online!==false;                     // 推送帧/服务器 online 字段优先,缺省在线
     setRoute(a,a.pathPts,[a.tx,a.ty]);
     return;}
   // 继承动画状态:帧被过滤时不重建线,poly/s/sEnd 原样保留 → 车停在线上,绝不斜穿/漂移
@@ -195,10 +208,14 @@ function ingest(a,old,now){                        // 单帧处置:可信度分�
   }else{
     a._frozenN=0;
     const step=Math.hypot(a.tx-old.tx,a.ty-old.ty);
-    const dtMs=Math.max(now-(old._posTick||now-POLL_GUESS),100);
-    if(step/dtMs*1000<=2.5){                    // 步速≤2.5m/s(>物理极限→异常采样,弃坐标不拽车)
+    const gapMs=Math.max(now-(old._posTick||now-POLL_GUESS),100);
+    if(step/gapMs*1000<=2.5){                   // 步速≤2.5m/s(>物理极限→异常采样,弃坐标不拽车)
       a._posTick=now;
-      a._gap=old._gap?old._gap*0.7+dtMs*0.3:dtMs;              // 实测推送间隔 EMA
+      // 修：页面挂起（后台标签/休眠）或推送长断后的首个间隔不许进 EMA——否则周期被记成几十秒，
+      // vCyc 的分母暴涨 → 动画先僵住、再在恢复瞬间拿错误预算冲刺。
+      const susp=gapMs>SUSPEND_GAP_MS;
+      const dtMs=susp?POLL_GUESS:gapMs;
+      a._gap=susp?POLL_GUESS:(old._gap?old._gap*0.7+dtMs*0.3:dtMs);   // 实测推送间隔 EMA
       const cyc=Math.max(dtMs/1000*0.8,0.12);                  // 本帧周期→vCyc=实测均速
       if(!noPath){setRoute(a,a.pathPts,[a.tx,a.ty],cyc);}
       else{                                     // 无历史轨迹但坐标在走:两点贴路追踪线(丢 path 也能显示追踪)
@@ -295,11 +312,12 @@ setInterval(feedTick,1000);
 setInterval(renderAlarms,30000);                        // 30s 让"告警时间"文案刷新
 
 // ---------- 渲染 ----------
-const dpr=window.devicePixelRatio||1;
-function resize(){const st=$("stage");   // 画布后备尺寸必须等于 stage 实际尺寸;canvas 默认 300px 宽,
+let dpr=window.devicePixelRatio||1;                  // 修：DPR 必须动态取——浏览器缩放/换显示器会变，
+function resize(){const st=$("stage");               // 写死一次会让画布在高分屏/缩放下永久变糊
+  dpr=window.devicePixelRatio||1;
   cv.width=st.clientWidth*dpr;cv.height=st.clientHeight*dpr;}  // 不显式调用就永远不初始化
 resize();
-addEventListener("resize",()=>{resize();if(map)fitView();});
+addEventListener("resize",()=>{resize();if(map)fitView();});   // 浏览器缩放同样触发 resize→DPR 重取
 function P(mx,my){return[mx*view.s+view.x,-my*view.s+view.y]} // 地图米 -> 屏幕px
 
 // ---------- 导航式运动(map matching + dead reckoning,仿高德/腾讯小车平滑移动) ----------
@@ -377,49 +395,68 @@ function resolveHead(tang,dir){                    // 车头仲裁:真实 robotD
   return Math.abs(dd)<0.6?[rd,false]:Math.abs(dd)>2.6?[rd,true]:[tang,false];   // 同向/反向/侧向不可信
 }
 
+// 单帧推进 / 挂起收敛：与渲染、DOM 解耦的纯逻辑，_dev/_resume_test.js 直接抽取本函数做回归
+function resyncAgv(a,now){                    // 页面挂起(后台标签/休眠/断点)后恢复：就地收敛，绝不补跑
+  a.v=0;a.turn=null;a._rev=false;
+  a.x=a.tx;a.y=a.ty;                          // 挂起期间车是真在走的：只能落到"当前位置"，
+  if(now)a._posTick=now;                      // 不能把这段时间走过的路当补帧任务重放一遍（那就是"飞"）
+  a.poly=null;a.s=0;a.sEnd=0;                 // 清空积压的弧长预算——追赶冲刺的能量来源
+  if(a.pathPts&&a.pathPts.length>=2)         // 重锚折线：线头=车，线尾=最近上报点（避免线被拉成一条长历史）
+    setRoute(a,a.pathPts,[a.tx,a.ty]);
+}
+function stepAgv(a,dt){                       // 单帧弧长推进：起步/停等/转弯/限速/车头缓动
+  if(!a.poly||a.poly.length<2){               // 无任务：向上报真实位置缓动收拢(path 清空≠位置失效)
+    const e=Math.min(dt*2,1);a.x+=(a.tx-a.x)*e;a.y+=(a.ty-a.y)*e;
+    if(!a.turn){const wa=-(+a.robotDir||0)*Math.PI/180;
+      let da=wa-a.ang;while(da>Math.PI)da-=2*Math.PI;while(da<-Math.PI)da+=2*Math.PI;
+      a.ang+=da*Math.min(dt*4,1);}
+    a.v=0;a._rev=false;                       // 修：清掉倒行标记，避免任务结束后徽标残留
+    return;
+  }
+  if(a.turn){                                 // 路口原地旋转动画：位置冻结，车头从入射轴转向出射轴
+    a.turn.t-=dt;
+    let da=a.turn.to-a.ang;while(da>Math.PI)da-=2*Math.PI;while(da<-Math.PI)da+=2*Math.PI;
+    const step=Math.abs(da)<=dt*9?da:Math.sign(da)*dt*9;
+    a.ang+=step;da-=step;
+    if(a.turn.t<=0||Math.abs(da)<0.02){a.ang=a.turn.to;a.turn=null;}
+    return;
+  }
+  // 目标速度=本周期实测均速 vCyc；迟到追帧保底基于本帧采纳时刻(防定时器漂移误判迟到导致加速冲刺)
+  let vT=a.sEnd>a.s+0.02?a.vCyc:0;
+  if(vT>0&&a.pushT){const tl=(a._gap||POLL_GUESS)/1000*0.8-(Date.now()-a.pushT)/1000;
+    if(tl<0.3&&a.sEnd-a.s>0.05)vT=Math.max(vT,(a.sEnd-a.s)/Math.max(tl,0.1));}   // 追帧窗口随实测推送节奏
+  vT=Math.min(vT,2);
+  const nc=a.corners.find(c=>!c.hit&&c.s>a.s);   // 进弯前 0.5m 线性减速到顶点限速(cap)
+  if(nc&&nc.s-a.s<0.5)vT=Math.min(vT,Math.max(0.05,vT)*clamp((nc.s-a.s)/0.5,0,1)+nc.cap*(1-clamp((nc.s-a.s)/0.5,0,1)));
+  const endD=a.sEnd-a.s;                          // 出弯或到终点前同样收油
+  if(endD<0.5)vT=Math.min(vT,Math.max(0.03,endD/0.5*vT));
+  const acc=(vT>a.v?1.2:1.8)*dt;
+  a.v=Math.abs(vT-a.v)<=acc?vT:a.v+Math.sign(vT-a.v)*acc;
+  a.s=Math.min(a.sEnd,a.s+a.v*dt);
+  const c=a.corners.find(c=>!c.hit&&c.s<=a.s+1e-6);     // 刚跨过的转弯点
+  if(c){a.s=c.s;const p=posAt(a);a.x=p.x;a.y=p.y;a.v=0; // 冻结角点,车头从入射轴原地旋到出射轴
+    c.hit=true;a.turn={t:0.35,to:c.to};return;}
+  const p=posAt(a);a.x=p.x;a.y=p.y;
+  const[th,rev]=resolveHead(p.ang,a.robotDir);   // 车头=真实朝向；与切向反向→倒行（位置仍沿 s 前进）
+  a._rev=rev;
+  let hda=th-a.ang;while(hda>Math.PI)hda-=2*Math.PI;while(hda<-Math.PI)hda+=2*Math.PI;
+  const hw=dt*10;                                 // 车头缓动 10rad/s（90°≈0.16s）：转弯被推送打断/倒行切换均不瞬跳
+  a.ang+=Math.abs(hda)<=hw?hda:Math.sign(hda)*hw;
+}
 let lastT=performance.now();
 function frame(t){
   requestAnimationFrame(frame);
   if(!map)return;
-  const dt=Math.min((t-lastT)/1000,0.25); lastT=t;
-  // 弧长推进:s+=v*dt;转弯点命中→s 冻结在角点,车头按角速度转向切向量
+  const raw=(t-lastT)/1000; lastT=t;          // 原始帧间隔（钳制前）——它才是"页面是否曾挂起"的证据
+  const dt=clamp(raw,0,0.25);
+  // 修·核心：浏览器把后台标签的 rAF 挂起/节流，挂起期间 ingest 仍在累积 sEnd，
+  // 回前台若照常推进，就会拿"残留的积压进度"在几帧内快速连续渲染 → AGV 沿轨迹加速冲刺("飞")。
+  // 正确做法=恢复首帧只做一次就地收敛：车落在最新上报位置，积压清零，之后按正常节奏平滑跟随。
+  const resumed=raw>RESUME_GAP_S;
+  const now=Date.now();
   for(const a of agvs.values()){
-    if(!a.poly||a.poly.length<2){                 // 无任务:向上报真实位置缓动收拢(path 清空≠位置失效)
-      const e=Math.min(dt*2,1);a.x+=(a.tx-a.x)*e;a.y+=(a.ty-a.y)*e;
-      if(!a.turn){const wa=-(+a.robotDir||0)*Math.PI/180;
-        let da=wa-a.ang;while(da>Math.PI)da-=2*Math.PI;while(da<-Math.PI)da+=2*Math.PI;
-        a.ang+=da*Math.min(dt*4,1);}
-      a.v=0;continue;
-    }
-    if(a.turn){                                   // 路口原地旋转动画:位置冻结,车头从入射轴转向出射轴
-      a.turn.t-=dt;
-      let da=a.turn.to-a.ang;while(da>Math.PI)da-=2*Math.PI;while(da<-Math.PI)da+=2*Math.PI;
-      const step=Math.abs(da)<=dt*9?da:Math.sign(da)*dt*9;
-      a.ang+=step;da-=step;
-      if(a.turn.t<=0||Math.abs(da)<0.02){a.ang=a.turn.to;a.turn=null;}
-      continue;
-    }
-    // 目标速度=本周期实测均速 vCyc;迟到追帧保底基于本帧采纳时刻(防定时器漂移误判迟到导致加速冲刺)
-    let vT=a.sEnd>a.s+0.02?a.vCyc:0;
-    if(vT>0&&a.pushT){const tl=(a._gap||POLL_GUESS)/1000*0.8-(Date.now()-a.pushT)/1000;
-      if(tl<0.3&&a.sEnd-a.s>0.05)vT=Math.max(vT,(a.sEnd-a.s)/Math.max(tl,0.1));}   // 追帧窗口随实测推送节奏
-    vT=Math.min(vT,2);
-    const nc=a.corners.find(c=>!c.hit&&c.s>a.s);   // 进弯前 0.5m 线性减速到顶点限速(cap)
-    if(nc&&nc.s-a.s<0.5)vT=Math.min(vT,Math.max(0.05,vT)*clamp((nc.s-a.s)/0.5,0,1)+nc.cap*(1-clamp((nc.s-a.s)/0.5,0,1)));
-    const endD=a.sEnd-a.s;                          // 出弯或到终点前同样收油
-    if(endD<0.5)vT=Math.min(vT,Math.max(0.03,endD/0.5*vT));
-    const acc=(vT>a.v?1.2:1.8)*dt;
-    a.v=Math.abs(vT-a.v)<=acc?vT:a.v+Math.sign(vT-a.v)*acc;
-    a.s=Math.min(a.sEnd,a.s+a.v*dt);
-    const c=a.corners.find(c=>!c.hit&&c.s<=a.s+1e-6);     // 刚跨过的转弯点
-    if(c){a.s=c.s;const p=posAt(a);a.x=p.x;a.y=p.y;a.v=0; // 冻结角点,车头从入射轴原地旋到出射轴
-      c.hit=true;a.turn={t:0.35,to:c.to};continue;}
-    const p=posAt(a);a.x=p.x;a.y=p.y;
-    const[th,rev]=resolveHead(p.ang,a.robotDir);   // 车头=真实朝向；与切向反向→倒行（位置仍沿 s 前进）
-    a._rev=rev;
-    let hda=th-a.ang;while(hda>Math.PI)hda-=2*Math.PI;while(hda<-Math.PI)hda+=2*Math.PI;
-    const hw=dt*10;                                 // 车头缓动 10rad/s（90°≈0.16s）：转弯被推送打断/倒行切换均不瞬跳
-    a.ang+=Math.abs(hda)<=hw?hda:Math.sign(hda)*hw;
+    if(resumed||a.sEnd-a.s>RESYNC_DIST)resyncAgv(a,now);   // 积压超阈值=渲染确实停过，兜底同样收敛
+    else stepAgv(a,dt);
   }
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.fillStyle="#eef1f5";ctx.fillRect(0,0,cv.width/dpr,cv.height/dpr);
@@ -516,15 +553,26 @@ function badge(txt,x,y,bg,fg){
   ctx.fillStyle=bg;rr(x-w/2,y-9,w,18,5);ctx.fill();
   ctx.fillStyle=fg;ctx.fillText(txt,x,y+4);ctx.textAlign="left";
 }
-function rr(x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r);}
+function rr(x,y,w,h,r){                          // 修：缺 roundRect 的老内核不该让整帧渲染抛异常(整张图空白)
+  if(ctx.roundRect){ctx.beginPath();ctx.roundRect(x,y,w,h,r);return;}
+  r=Math.max(0,Math.min(r,w/2,h/2));ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();
+}
 function tri(x,y,s){ctx.beginPath();ctx.moveTo(x+s,y);ctx.lineTo(x,y-s*0.6);ctx.lineTo(x,y+s*0.6);ctx.closePath();ctx.fill();}
 requestAnimationFrame(frame);
 
-// ---------- 交互 ----------
-let curMap=new URLSearchParams(location.search).get("map")||"BB";
-$("mapSel").innerHTML=MAPS.map(m=>`<option value="${m}" ${m===curMap?"selected":""}>${m} ${MAP_NAMES[m]}</option>`).join("");
-$("mapSel").onchange=e=>{curMap=e.target.value;agvs.clear();sel=null;loadMap(curMap);renderList();renderDetail();};
-loadMap(curMap).then(()=>sseConnect()).catch(e=>{const m=$("msg");m.style.display="block";m.textContent="地图加载失败:"+e.message;});   // 地图就绪后再连事件流
+// ---------- 配置 / 交互 ----------
+let curMap="";
+function showMsg(t){const m=$("msg");m.style.display="block";m.textContent=t;}   // 失败不再静默
+async function loadCfg(){                          // 站点配置唯一来源=后端 /api/config（值在 config.py）
+  try{const r=await fetch("api/config",{cache:"no-store"});
+    if(r.ok){const j=await r.json();CFG=Object.assign(CFG,j);POLL_GUESS=CFG.pollGuessMs||POLL_GUESS;}}catch(e){}
+}
+async function switchMap(qr){                      // 换图：清车 → 载新图；失败给出提示而不是空图
+  curMap=qr;agvs.clear();sel=null;renderList();renderDetail();
+  try{await loadMap(curMap);}catch(e){showMsg("地图加载失败:"+e.message);}
+}
 $("sync").onclick=async()=>{
   const b=$("sync");b.disabled=true;b.textContent="⟳ 同步中...";
   try{
@@ -535,24 +583,38 @@ $("sync").onclick=async()=>{
   }catch(e){b.textContent="⚠ 同步失败";}
   setTimeout(()=>{b.disabled=false;b.textContent="⟳ 同步地图";},4000);
 };
+// 启动顺序：配置 → 地图 → 事件流（避免地图清单写死、避免 loadMap 竞态白等一个周期）
+(async()=>{
+  await loadCfg();
+  curMap=new URLSearchParams(location.search).get("map")||CFG.defaultMap;
+  $("mapSel").innerHTML=CFG.maps.map(m=>`<option value="${m}" ${m===curMap?"selected":""}>${m} ${CFG.mapNames[m]||""}</option>`).join("");
+  $("mapSel").onchange=e=>switchMap(e.target.value);
+  try{await loadMap(curMap);}catch(e){showMsg("地图加载失败:"+e.message);return;}
+  sseConnect();
+})();
 cv.onwheel=e=>{e.preventDefault();
-  const f=e.deltaY<0?1.15:1/1.15, [mx,my]=[e.offsetX,e.offsetY];
-  view.x=mx-(mx-view.x)*f; view.y=my-(my-view.y)*f; view.s*=f;};
+  const f=e.deltaY<0?1.15:1/1.15,[mx,my]=[e.offsetX,e.offsetY];
+  const ns=clamp(view.s*f,fitS/8,fitS*8),k=ns/view.s;    // 修：缩放上下限，避免滚轮把地图滚成无穷/一个点
+  view.x=mx-(mx-view.x)*k; view.y=my-(my-view.y)*k; view.s=ns; clampView();};
 let downXY=null;                                   // 拖地图误触保护:位移>5px 不算点击
-cv.onmousedown=e=>{downXY=[e.offsetX,e.offsetY];drag=[e.offsetX,e.offsetY,cv.style.cursor="grabbing"];};
-onmouseup=()=>{drag=null;cv.style.cursor="";};
+cv.onmousedown=e=>{downXY=[e.clientX,e.clientY];drag=[e.clientX,e.clientY];cv.style.cursor="grabbing";e.preventDefault();};
+addEventListener("mousemove",e=>{                  // 修：拖拽挂在 window 上——指针移出画布再回来不再跳变
+  if(!drag)return;
+  view.x+=e.clientX-drag[0];view.y+=e.clientY-drag[1];drag=[e.clientX,e.clientY];clampView();});
+addEventListener("mouseup",()=>{drag=null;cv.style.cursor="";});
 cv.onmousemove=e=>{
-  if(drag){view.x+=e.offsetX-drag[0];view.y+=e.offsetY-drag[1];drag=[e.offsetX,e.offsetY];}
   const hit=hitAgv(e.offsetX,e.offsetY), tip=$("tip");
+  if(drag){tip.style.display="none";cv.style.cursor="grabbing";return;}
   if(hit){const[a]=hit;tip.style.display="block";
     tip.style.left=(e.offsetX+14)+"px";tip.style.top=(e.offsetY+8)+"px";
     tip.textContent=`#${a.robotCode} ${stInfo(a.status)[0]}\n电量 ${a.battery}%  速度 ${a.speed}mm/s\n货架 ${a.podCode||"无"}`;
     cv.style.cursor="pointer";}
-  else{tip.style.display="none";cv.style.cursor=drag?"grabbing":"";}
+  else{tip.style.display="none";cv.style.cursor="";}
 };
-cv.onclick=e=>{if(downXY&&Math.hypot(e.offsetX-downXY[0],e.offsetY-downXY[1])>5){downXY=null;return;}   // 拖动后不算点击
+cv.onclick=e=>{if(downXY&&Math.hypot(e.clientX-downXY[0],e.clientY-downXY[1])>5){downXY=null;return;}   // 拖动后不算点击
   downXY=null;const h=hitAgv(e.offsetX,e.offsetY);sel=h?h[0].robotCode:null;renderList();renderDetail();};
 function hitAgv(px,py){
+  if(!map)return null;                             // 修：地图未就绪时命中检测直接返回，不空指针
   let best=null,bd=18;
   for(const a of agvs.values()){
     if(a.mapCode&&a.mapCode!==map.qr)continue;
@@ -567,7 +629,7 @@ function renderList(){
   const cur=arr.filter(a=>!a.mapCode||a.mapCode===map?.qr);
   let run=0,idle=0,chg=0,err=0,off=0;
   for(const a of cur){const c=stInfo(a.status)[1];
-    if(a.online===false){off++;continue;}           // 失联(3 周期无数据/服务器下线):单独计数
+    if(a.online===false){off++;continue;}           // 失联(8s 无推送/服务器置离线):单独计数
     c==="run"?run++:c==="chg"?chg++:c==="err"?err++:idle++;}
   $("cRun").textContent=run;$("cIdle").textContent=idle;$("cChg").textContent=chg;$("cErr").textContent=err;$("cOff").textContent=off;
   $("list").innerHTML=cur.map(a=>{
@@ -583,7 +645,7 @@ function renderList(){
   document.querySelectorAll(".row[data-id]").forEach(el=>el.onclick=()=>{
     sel=el.dataset.id;const a=agvs.get(sel);
     if(a&&map){const[px,py]=P(a.x,a.y),W=cv.width/dpr,H=cv.height/dpr;
-      view.x+=W/2-px;view.y+=H/2-py;}
+      view.x+=W/2-px;view.y+=H/2-py;clampView();}
     renderList();renderDetail();});
 }
 function renderDetail(){

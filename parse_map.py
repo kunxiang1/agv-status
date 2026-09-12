@@ -1,5 +1,8 @@
 # Parse Hik RCS map XML -> compact JSON for web canvas (nodes + edges + type legend)
-import json, re, glob, os, sys
+import json, re, glob, os
+
+import config as C
+
 
 def parse_map(path, txt=None):
     if txt is None:
@@ -38,11 +41,11 @@ if __name__ == '__main__':
     out_dir = os.path.join(os.path.dirname(__file__), 'maps')
     os.makedirs(out_dir, exist_ok=True)
     legend = {}
-    # 用法: python parse_map.py 地图.xml ...（CMS 界面导出的拓扑 XML；不给参数则找当前目录 地图-*.xml）
-    for f in (sys.argv[1:] or glob.glob(os.path.join(os.getcwd(), '地图-*.xml'))):
+    for f in glob.glob(os.path.join(C.MAP_XML_DIR, C.MAP_XML_GLOB)):
         m = parse_map(f)
         fp = os.path.join(out_dir, m['qr'] + '.json')
-        json.dump(m, open(fp, 'w', encoding='utf-8'), ensure_ascii=False)
+        with open(fp, 'w', encoding='utf-8') as fh:      # 显式关闭句柄，避免 Windows 下占用/未落盘
+            json.dump(m, fh, ensure_ascii=False)
         vals = {}
         for n in m['nodes']:
             vals[n[3]] = vals.get(n[3], 0) + 1

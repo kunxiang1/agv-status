@@ -1,7 +1,7 @@
 // 导航式运动核心断言：从 index.html 实时抽函数，防止测试与实现脱钩
-// 用法: node _nav_test.js [index.html 路径，默认 ./index.html]
-const fs=require('fs');
-const SRC=process.argv[2]||'index.html';
+// 用法: node _nav_test.js [index.html 路径，默认 <项目根>/index.html]
+const fs=require('fs'),path=require('path');
+const SRC=process.argv[2]||path.join(__dirname,'..','index.html');
 const js=fs.readFileSync(SRC,'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 global.map={nodes:[[1,7,10,16],[2,8,10,16],[3,8,12,16],[4,9,12,16],[5,9,14,16]],
   edges:[[1,2],[2,3],[3,4],[4,5]]};

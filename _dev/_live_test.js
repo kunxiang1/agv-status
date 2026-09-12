@@ -1,17 +1,16 @@
 // 真实数据端到端验证：从本地代理拉两帧真实 RCS 快照，跑 ingest→setRoute→动画推进全链路
 // 前置：python server.py 已启动（默认 8899，或用 argv[3] 指定端口）
-// 用法: node _live_test.js [index.html路径] [代理端口]
-const fs=require('fs');
-const SRC=process.argv[2]||'index.html';
+// 用法: node _live_test.js [index.html路径，默认 <项目根>/index.html] [代理端口]
+const fs=require('fs'),path=require('path');
+const SRC=process.argv[2]||path.join(__dirname,'..','index.html');
 const PORT=process.argv[3]||'8899';
 const js=fs.readFileSync(SRC,'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 // ---- 载入真实地图 BB ----
-const path=require('path');
 const bb=JSON.parse(fs.readFileSync(path.join(path.dirname(SRC),'maps','BB.json'),'utf8'));
 global.map={nodes:bb.nodes,edges:bb.edges};
 map.nodeMap={};map.nodes.forEach(n=>map.nodeMap[n[0]]=n);
 map.adj={};map.edges.forEach(([a,b])=>{(map.adj[a]??=[]).push(b);(map.adj[b]??=[]).push(a);});
-const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),POLL_GUESS=250;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),POLL_GUESS=250,SUSPEND_GAP_MS=1500;
 const ex=re=>{const m=js.match(re);if(!m)throw new Error('extract fail: '+re);return m[0];};
 eval(ex(/function snapNode[\s\S]*?\n}/));
 eval(ex(/const dot3=[^\n]*/).replace('const dot3','var dot3'));

@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AGV 实时监控 · 全面代码审核与修复报告（2026-09-12）</title>
+<style>
+  :root{--ink:#1c2130;--dim:#6b7280;--line:#d8dbe2;--accent:#b45309;--soft:#fdf3e7;
+        --ok:#1a7f4b;--bad:#b3261e;--code:#f0eee9;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#faf9f7;color:var(--ink);font:15px/1.85 "Microsoft YaHei","PingFang SC",sans-serif}
+  .wrap{max-width:920px;margin:0 auto;padding:56px 28px 96px}
+  .kicker{font-size:12px;letter-spacing:.35em;color:var(--accent);font-weight:700}
+  h1{font-size:33px;line-height:1.3;font-weight:700;margin:14px 0 10px}
+  .meta{color:var(--dim);font-size:13px;border-bottom:1px solid var(--line);padding-bottom:26px}
+  h2{font-size:21px;margin:54px 0 16px;padding-top:18px;border-top:1px solid var(--line);font-weight:700}
+  h2 .no{color:var(--accent);font-family:Georgia,serif;margin-right:10px}
+  h3{font-size:16px;margin:26px 0 8px;font-weight:700}
+  p{margin:10px 0}
+  .lede{font-size:16.5px;line-height:1.9;margin:26px 0;padding:20px 24px;background:var(--soft);
+        border-left:3px solid var(--accent)}
+  .lede b{color:var(--accent)}
+  table{width:100%;border-collapse:collapse;margin:14px 0 8px;font-size:13.5px}
+  th{font-size:11.5px;letter-spacing:.1em;color:var(--dim);text-align:left;padding:8px 10px;
+     border-bottom:2px solid var(--ink);font-weight:700}
+  td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:2px solid var(--ink)}
+  .sev{display:inline-block;font-size:11px;font-weight:700;padding:1px 8px;border:1px solid;border-radius:3px;white-space:nowrap}
+  .s1{color:var(--bad);border-color:var(--bad)}
+  .s2{color:var(--accent);border-color:var(--accent)}
+  .s3{color:var(--dim);border-color:var(--dim)}
+  code{font:12.5px/1.6 Consolas,"Courier New",monospace;background:var(--code);padding:1px 5px;border-radius:3px}
+  .mono{font-family:Consolas,monospace;font-size:13px}
+  ul,ol{margin:8px 0 8px 22px}
+  li{margin:5px 0}
+  .callout{border:1px solid var(--line);border-left:3px solid var(--accent);padding:14px 18px;margin:16px 0;background:#fffdf9}
+  .callout .t{font-weight:700;font-size:13px;letter-spacing:.08em;color:var(--accent);margin-bottom:4px}
+  .callout.bad{border-left-color:var(--bad)}.callout.bad .t{color:var(--bad)}
+  .callout.ok{border-left-color:var(--ok)}.callout.ok .t{color:var(--ok)}
+  .result{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
+          border:1px solid var(--line);margin:18px 0}
+  .result div{background:#fff;padding:16px 18px}
+  .result .n{font:700 25px/1.2 Georgia,serif;color:var(--accent)}
+  .result .l{font-size:12px;color:var(--dim);margin-top:4px}
+  .flow{margin:18px 0;border:1px solid var(--line);background:#fff}
+  .flow .row{display:grid;grid-template-columns:210px 1fr;border-bottom:1px solid var(--line)}
+  .flow .row:last-child{border-bottom:none}
+  .flow .k{padding:12px 16px;font-weight:700;font-size:13px;background:#f5f3ef;border-right:1px solid var(--line)}
+  .flow .v{padding:12px 16px;font-size:13.5px}
+  .foot{margin-top:64px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font-size:12.5px}
+  .ok{color:var(--ok);font-weight:700}.bad{color:var(--bad);font-weight:700}
+  pre{background:#1c2130;color:#e6edf3;padding:14px 16px;border-radius:6px;overflow-x:auto;
+      font:12.5px/1.7 Consolas,monospace;margin:12px 0}
+  .del{color:#ff9c8a}.add{color:#8ee6a0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="kicker">Code Review &amp; Fix Report</div>
+  <h1>AGV 实时监控 · 全面代码审核与修复</h1>
+  <div class="meta">
+    对象：agv-web（海康 RCS-2000 私有推送 Web 监控） · 范围：全项目（config.py / rcs_push.py / server.py / index.html / parse_map.py / _dev）
+    + 对外服务（ZMTP 代理）运维面 · 验证：现场真实产线数据端到端 + 5 组离线回归 · 备份：<span class="mono">*.bak-0912</span>
+  </div>
+
+  <div class="lede">
+    本轮做三件事：<b>①把散落在各处的 IP/账号/地图清单收敛到唯一的 <span class="mono">config.py</span></b>（并让前端也走同一来源）；
+    <b>②定位并修掉「浏览器切回前台时 AGV 沿轨迹加速冲刺（飞）」</b>——根因是后台标签 rAF 被挂起、
+    而数据通道仍在累积，回前台后引擎把这几十米"残留进度"当成补帧任务连续渲染；
+    <b>③清掉 10 处潜在缺陷</b>（TCP 短读、登录失败可能锁号、静态服务会外发含密码的源码、DPR 写死导致画面变糊、
+    订阅线程被单帧异常打死等）。全部改动以现场真实数据回归验证，并另建 3 个自动化用例长期看护。
+  </div>
+
+  <h2><span class="no">01</span>设计意图与整体架构（审核前提）</h2>
+  <p>项目是<b>纯标准库 + 原生 HTML/JS</b> 的零依赖监控页，链路是一条"单向管道"：</p>
+  <div class="flow">
+    <div class="row"><div class="k">数据源</div><div class="v">海康 RCS-2000 私有 ZMTP 推送通道（6990 状态/路径、8790 告警），
+      每车约 208ms 一帧 ≈ 5Hz；官方 REST（8083）已弃用——精度不够是动画"不跟手"的根因</div></div>
+    <div class="row"><div class="k">后端 server.py</div><div class="v">仅两条订阅连接（数据 + 告警）→ 解析成事件 → 广播；
+      浏览器侧用 SSE 共享同一条订阅；断线自愈（重登录重连 / EventSource 重连）</div></div>
+    <div class="row"><div class="k">前端 index.html</div><div class="v">事件 → <code>ingest</code>（帧可信度分层：重复帧停等、步速&gt;2.5m/s 弃坐标）
+      → <code>stepAgv</code>（导航式弧长推进：车是折线上的弧长 s，s 只增不减，上报坐标只作证据不作自由坐标）
+      → canvas 渲染</div></div>
+    <div class="row"><div class="k">设计底线</div><div class="v">线绝不斜穿空白（斜段沿路网 BFS 绕）；结构上不可能往回走；
+      动画允许落后真实车 0～1 个上报周期，但永不越过证据点</div></div>
+  </div>
+  <p>理解这一点是判定下面所有问题的基准：<b>动画的一切位移都必须有"路上的证据"支撑</b>，
+  而"页面曾经不渲染"这段时间恰恰没有渲染证据——这正是缺陷二的发生地。</p>
+
+  <h2><span class="no">02</span>要求一：配置集中到单一位置</h2>
+  <p>审核前的实际情况：RCS 的两个 IP、端口、账号密码在 <code>rcs_push.py</code> 和 <code>server.py</code> 各写一份；
+  地图清单在 <code>server.py（MAP_CODES）</code> 与 <code>index.html（MAPS/MAP_NAMES）</code> 各写一份；
+  <code>_dev</code> 脚本里还硬编码了绝对路径与明文密码。</p>
+  <table>
+    <tr><th style="width:30%">新增/改动</th><th>内容</th></tr>
+    <tr><td class="mono">config.py <span class="sev s3">新增</span></td>
+        <td>唯一配置源：<code>RCS_WEB_IP / RCS_ENGINE_IP</code>、<code>PORT_WEB/PUSH/ALARM</code>、
+        <code>RCS_USER / RCS_PWD</code>、<code>MAP_CODES / MAP_NAMES / DEFAULT_MAP</code>、<code>WEB_PORT</code>、
+        <code>LOGIN_BACKOFF_S</code>、地图 XML 目录；派生 <code>WEB_BASE / push_targets() / sha256_pwd() / client_config()</code></td></tr>
+    <tr><td class="mono">rcs_push.py</td><td>删除自带的 IP/账号常量，改为 <code>import config as C</code></td></tr>
+    <tr><td class="mono">server.py</td><td>同上；地图清单、推送目标、登录摘要、默认端口全部改从 config 取；
+        新增 <code>GET /api/config</code> 把浏览器需要的子集下发（<b>不含任何凭据</b>）</td></tr>
+    <tr><td class="mono">index.html</td><td>删除内置 <code>MAPS / MAP_NAMES / POLL_GUESS</code>，启动顺序改为
+        <b>取配置 → 载地图 → 连 SSE</b>（顺带消除了原先 loadMap 竞态白等）</td></tr>
+    <tr><td class="mono">parse_map.py / _dev</td><td>离线 XML 目录、脚本内的源文件路径（改 <code>__dirname</code> 相对）、
+        <code>_verify.py</code> 的 IP 与密码摘要，全部改为从 config / 相对路径取</td></tr>
+  </table>
+  <p>「改一处全局生效」不是口头承诺，而由 <code>python _dev/_config_test.py</code> 自动断言：它扫描全部可执行源码，
+  要求这些环境字面量<b>只在 config.py 出现</b>，并校验各模块、<code>/api/config</code> 与 config.py 同源。
+  当前 18 项断言全部通过。</p>
+
+  <h2><span class="no">03</span>要求二：切回前台「AGV 飞」的根因与修复</h2>
+  <h3>3.1 复现与量化</h3>
+  <p>用真实抽取的引擎函数 + 虚拟时钟做确定性仿真（<code>_dev/_resume_test.js</code>）：车以 1m/s 沿路走，
+  上报 208ms 一次；前台正常跑 10s 后模拟"后台挂起"（<b>不出帧，但数据通道照常投递</b>），40s 后恢复。</p>
+  <table>
+    <tr><th style="width:22%">场景</th><th style="width:20%">积压弧长</th><th>修复前</th><th>修复后</th></tr>
+    <tr><td>挂起 40s</td><td class="mono">40.3 m</td>
+        <td>恢复后首帧仍停在 40m 前；随后 3s 内<b>沿轨迹自行补帧 5.80m</b>（≈2m/s 全速冲刺，按此速率要飞 20 秒）</td>
+        <td>恢复首帧即落在最新上报位置（误差 <span class="mono">0</span>），随后 3s 自行补帧 <b>0.00m</b></td></tr>
+    <tr><td>挂起 1.2s</td><td class="mono">1.4 m</td>
+        <td>恢复后 3s 内自行补帧 1.07m（短促一窜）</td>
+        <td>0.00m</td></tr>
+  </table>
+  <div class="callout bad"><div class="t">根因链</div>
+    后台标签的 <code>requestAnimationFrame</code> 被浏览器挂起/节流，但 <b>SSE 仍投递、<code>ingest</code> 仍在把
+    <code>sEnd</code> 推向最新上报位置</b>；而 <code>s</code>（动画已走到的弧长）不动 → 两者之间积压出几十米。
+    回前台后 <code>frame</code> 照常推进，迟到追帧分支 <code>(sEnd-s)/max(tl,0.1)</code> 一见"迟到"
+    就取<b>全部积压</b>除以 0.1s，被 2m/s 上限截断后仍是一段持续数十秒的全速冲刺——
+    这就是"残留的未渲染数据被快速连续渲染"造成的瞬间位移。<br>
+    同时 <code>ingest</code> 会把挂起时长（几万毫秒）当成本次推送周期喂给节奏 EMA，使 <code>vCyc</code> 分母暴涨，
+    表现为"先僵住、再一窜"。
+  </div>
+  <h3>3.2 修复</h3>
+  <table>
+    <tr><th style="width:30%">位置</th><th>措施</th></tr>
+    <tr><td class="mono">stepAgv / resyncAgv <span class="sev s3">重构</span></td>
+        <td>把逐车推进从 <code>frame</code> 里抽出成与渲染、DOM 解耦的纯函数。
+        <code>frame</code> 拿到<b>钳制前</b>的原始帧间隔：若 <code>&gt; RESUME_GAP_S(0.5s)</code>（或积压 <code>&gt; RESYNC_DIST(8m)</code>）
+        即判定"页面曾挂起"，本帧对每车只调 <code>resyncAgv</code>：位置落到最新上报点、
+        清空 <code>s/sEnd</code> 积压、按最新 path 重锚折线。<b>一次就地收敛，不补跑走过的路。</b></td></tr>
+    <tr><td class="mono">ingest</td>
+        <td>上报间隔 <code>&gt; SUSPEND_GAP_MS(1.5s)</code> 视为推送长断：该间隔<b>不进</b> <code>_gap</code> EMA，
+        按标称节奏计 <code>vCyc</code>，避免恢复瞬间拿错误预算冲刺</td></tr>
+    <tr><td class="mono">frame 调度</td>
+        <td><code>resumed || 积压&gt;RESYNC_DIST ? resyncAgv(a) : stepAgv(a,dt)</code>；
+        <code>dt</code> 仍钳在 0.25s 内作为双保险</td></tr>
+  </table>
+  <p>关于"代价"的说明：挂起期间车确实在真实行驶，恢复时它必然出现在新位置——
+  这是唯一诚实的画法（等价于导航 App 切回来的车标重定位）。修复消除的是<b>被渲染成一段持续数秒的追赶动画</b>，
+  而不是"车标出现在正确位置"这件事本身。</p>
+  <div class="callout ok"><div class="t">稳态零回归</div>
+    修复不碰正常路径上的任何公式：仿真里 6s 稳态位移与滞后在修复前后<b>逐位相同</b>（5.64m / 0.19m），
+    60s 长跑滞后 0.35m → 0.27m（有界恒定偏移，不发散），车头速度不超过真实车速。
+    修复前那份旧逻辑仍以"对照组"形式留在测试文件里，保证断言有效。
+  </div>
+
+  <h2><span class="no">04</span>要求三：其他缺陷排查与修复</h2>
+  <table>
+    <tr><th style="width:56px">编号</th><th style="width:78px">等级</th><th style="width:30%">现象 / 触发</th><th>根因与修复</th></tr>
+    <tr><td class="mono">B1</td><td><span class="sev s1">严重·安全</span></td>
+        <td>任意 <code>GET</code> 都能下载到 <code>config.py</code>（<b>明文账号密码</b>）、<code>server.py</code> 源码、
+        <code>*.bak-*</code> 备份、<code>README.md</code>——同网段谁都能拿</td>
+        <td>静态服务原先只做路径前缀校验。改为<b>后缀白名单</b>放行
+        （<code>.html/.htm/.js/.json/.css/.png/.svg/.ico/.jpg/.woff2</code>），其余一律 404。
+        实测 <code>/config.py</code>、<code>/server.py</code>、<code>/index.html.bak-0912</code>、<code>/README.md</code> 均 404</td></tr>
+    <tr><td class="mono">B2</td><td><span class="sev s1">严重·账号</span></td>
+        <td>凭据一旦配错，<code>iter_msgs</code> 会每 3s 重登一次，无限循环——而 RCS 登录<b>连错会锁账号</b></td>
+        <td>新增 <code>LoginError</code> 与网络故障区分；凭据类失败按 <code>LOGIN_BACKOFF_S(60s)</code> 长退避并显式告警，网络故障仍 3s 重试</td></tr>
+    <tr><td class="mono">B3</td><td><span class="sev s1">严重·静默停摆</span></td>
+        <td><code>sub_loop</code> 里一帧畸形 XML 若让解析抛出，订阅线程直接死掉，全站从此无数据且无提示</td>
+        <td>单帧解析包 try/except，异常跳过并打印，线程继续存活</td></tr>
+    <tr><td class="mono">B4</td><td><span class="sev s2">中·协议</span></td>
+        <td>ZMTP 握手用单次 <code>s.recv(10)</code> 读服务器 greeting：TCP 短读时拿到不足 10 字节，握手错位</td>
+        <td>新增 <code>_recv_exact(s,n)</code> 循环读满；失败抛明确异常交由重连</td></tr>
+    <tr><td class="mono">B5</td><td><span class="sev s2">中·数据</span></td>
+        <td>登录成功判定用子串匹配 <code>b'"success":true'</code>，服务端一旦改格式/加空格就误判为失败</td>
+        <td>改为解析 JSON 判 <code>success</code>，解析失败才回退子串匹配</td></tr>
+    <tr><td class="mono">B6</td><td><span class="sev s2">中·显示</span></td>
+        <td>DPR 只在脚本加载时取一次：浏览器缩放或换高分屏后画布永久变糊</td>
+        <td><code>dpr</code> 改 <code>let</code> 并在每次 <code>resize()</code> 重取（缩放同样触发 resize）</td></tr>
+    <tr><td class="mono">B7</td><td><span class="sev s2">中·兼容</span></td>
+        <td>车形圆角依赖 <code>ctx.roundRect</code>，缺该 API 的内核会让<b>每一帧渲染都抛异常</b>→ 整张地图空白</td>
+        <td><code>rr()</code> 增加 <code>arcTo</code> 降级实现</td></tr>
+    <tr><td class="mono">B8</td><td><span class="sev s3">低·交互</span></td>
+        <td>滚轮可把地图缩到无穷大/无穷小；拖拽能把地图完全拖出屏幕，没有任何回位手段</td>
+        <td>缩放限位到 1x 基准的 1/8～8 倍；新增 <code>clampView()</code> 按"地图大于视口则不许露边、小于视口则不许出框"回收视角；选中车辆居中后同样回收</td></tr>
+    <tr><td class="mono">B9</td><td><span class="sev s3">低·交互</span></td>
+        <td>拖拽用画布内 <code>offsetX/Y</code>：指针移出画布再移回，视角按进出点之差<b>突然跳变</b></td>
+        <td>拖拽改挂 <code>window</code> 并用 <code>clientX/Y</code>，出画布不再丢帧；顺带修掉拖动时误弹提示框</td></tr>
+    <tr><td class="mono">B10</td><td><span class="sev s3">低·状态</span></td>
+        <td>任务结束（path 清空）后 <code>_rev</code> 未复位，车上的「倒行」徽标会一直残留；地图未就绪时 <code>hitAgv</code> 空指针</td>
+        <td>无 poly 分支清 <code>_rev</code>；<code>hitAgv</code> 加 <code>if(!map) return null</code></td></tr>
+    <tr><td class="mono">B11</td><td><span class="sev s3">低·体验</span></td>
+        <td>换地图 / 点"同步地图"失败时静默无反馈；文件句柄靠 GC 释放</td>
+        <td>统一 <code>showMsg()</code> 提示；<code>json.dump</code> 改 <code>with</code>；端口参数非法回退默认值而非崩溃</td></tr>
+  </table>
+  <div class="callout"><div class="t">一度引入又主动回退的一处改动</div>
+    曾把 HTTP 服务改成 <code>HTTP/1.1</code> 长连接以复用静态资源连接，实测客户端断开时 socketserver 会刷出大量
+    连接重置堆栈。收益（本机 4 个静态请求）远小于噪音与行为风险，已回退为默认行为，
+    并新增 <code>handle_error</code> 把断连类异常降噪——现在服务端日志干净。
+  </div>
+
+  <h2><span class="no">05</span>验证</h2>
+  <div class="result">
+    <div><div class="n">18</div><div class="l">配置集中化断言<br>（_config_test.py）</div></div>
+    <div><div class="n">12 + 15</div><div class="l">动画 12 组逻辑用例<br>+ 挂起恢复 15 项断言</div></div>
+    <div><div class="n">11</div><div class="l">启动链路无头集成断言<br>（_boot_test.py）</div></div>
+    <div><div class="n">LIVE PASS</div><div class="l">现场真实产线数据<br>端到端（BB 两台真车）</div></div>
+  </div>
+  <h3>5.1 现场真实数据（本轮本机可直连 RCS，非模拟）</h3>
+  <ul>
+    <li><b>推送通道</b>：6 秒抓到 854 条事件，四类齐全——<span class="mono">status 348 / path 348 / offline 116 / alarm 42</span>；
+        status 覆盖四张图 <span class="mono">CC 145 / EE 87 / DD 58 / BB 58</span>，证实重构后的解析器与真实帧完全兼容，
+        新增的 <code>online</code> 字段也已随帧下发。</li>
+    <li><b>动画全链路</b>：<code>_live_test.js</code> 用真实快照跑 ingest→setRoute→推进，
+        BB 两台车（#7 待机、#14 任务中）<b>贴路、无瞬移、逐帧单调贴近上报点</b>，终态误差 0.00m。</li>
+    <li><b>offline 事件核查</b>：事件里的车号（8 / 8003 / 60001 / 8007）均<b>不属于本图在册车辆</b>，
+        前端按 id 查不到即忽略，不会造成失联标记误闪——确认为噪声而非缺陷。</li>
+    <li><b>HTTP 端点</b>：<code>/api/config</code> 正确下发；静态资源字节数正确
+        （index.html 40 071B / alarm.js 52 710B / CC.json 25 066B）；敏感路径全部 404。</li>
+  </ul>
+  <h3>5.2 回归口径</h3>
+  <ul>
+    <li>所有动画用例<b>从 index.html 实时抽取函数</b>（正则提取后 eval），改实现即改测试，杜绝测试与实现脱钩；
+        挂起恢复用例把常量也从源码里读出来，不另抄一份。</li>
+    <li>新增 <code>_dev/_run_all.py</code> 一键跑完全部离线用例（不连 RCS，随时可跑）。</li>
+    <li><code>_boot_test.js</code> 用最小 DOM 桩在 Node 里<b>真跑一遍页面脚本</b>：配置→地图→SSE→真实 status 帧→列表→渲染，
+        含"凭空跳 60s"模拟挂起恢复的渲染帧，全程不许抛异常——覆盖语法检查查不出的运行时问题。</li>
+  </ul>
+
+  <h2><span class="no">06</span>交付清单与回滚</h2>
+  <table>
+    <tr><th style="width:26%">文件</th><th>变更</th></tr>
+    <tr><td class="mono">config.py <span class="sev s3">新增</span></td><td>唯一配置源（含派生辅助函数）</td></tr>
+    <tr><td class="mono">index.html</td><td>配置改由 /api/config 下发；动画引擎抽出 <code>stepAgv/resyncAgv</code> 并加挂起收敛与积压兜底；
+        ingest 加节奏 EMA 防污染；DPR 动态、roundRect 降级、视角限位回收、拖拽坐标修正、空指针与徽标残留修复</td></tr>
+    <tr><td class="mono">server.py</td><td>接入 config；新增 <code>/api/config</code>；静态后缀白名单；单帧异常隔离；断连降噪；句柄与端口加固</td></tr>
+    <tr><td class="mono">rcs_push.py</td><td>接入 config；<code>_recv_exact</code> 修短读；登录失败长退避；JSON 判成功</td></tr>
+    <tr><td class="mono">parse_map.py</td><td>接入 config；写文件改 with</td></tr>
+    <tr><td class="mono">_dev/</td><td>新增 <code>_config_test.py / _resume_test.js / _boot_test.js / _run_all.py</code>；
+        三个既有测试改为相对路径并补齐新常量；<code>_verify.py</code> 接入 config</td></tr>
+    <tr><td class="mono">*.bak-0912</td><td>index.html / server.py / rcs_push.py / parse_map.py / _dev 三个测试与 _verify.py 的改前原件，
+        <span class="ok">回滚直接复制回去即可</span></td></tr>
+  </table>
+  <pre># 启动（页面每次请求现读，改完刷新即生效，无需重启进程）
+python server.py                 <span style="color:#8b949e"># 默认 8899</span>
+http://127.0.0.1:8899/?map=BB
+
+# 回归
+python _dev/_run_all.py          <span style="color:#8b949e"># 全部离线用例</span>
+node   _dev/_live_test.js        <span style="color:#8b949e"># 现场真实数据（需 server 在跑）</span></pre>
+
+  <h2><span class="no">07</span>架构确认：本机是否已经是「ZMTP 代理」</h2>
+  <p>结论：<b>当前架构已经就是你要的形态</b>——本机是唯一与 RCS 通讯的节点，其它主机只访问本机的 8899。
+  这不是"应该改成这样"，而是现有代码的实际行为，已逐条取证：</p>
+  <table>
+    <tr><th style="width:34%">你的要求</th><th style="width:14%">现状</th><th>证据</th></tr>
+    <tr><td>只有本机和 ZMTP 通讯</td><td><span class="ok">✔ 已满足</span></td>
+        <td>全项目只有 <code>rcs_push.py</code> 建 socket；<code>server.py</code> 启动时按 <code>config.push_targets()</code>
+        起 <b>2 条</b>订阅线程（6990 数据 + 8790 告警），除此之外没有任何地方连 RCS</td></tr>
+    <tr><td>其它主机访问本机 8899</td><td><span class="ok">✔ 已满足</span></td>
+        <td>服务端本就绑 <code>0.0.0.0</code>（非 <code>127.0.0.1</code>），任意主机可访问</td></tr>
+    <tr><td>不需要客户端直接向 ZMTP 请求数据</td><td><span class="ok">✔ 已满足</span></td>
+        <td>在 <code>index.html / status.js / alarm.js</code> 里检索 <code>rcs-ip.* / 6990 / 8790 / 8181 / 8083 / socket</code>：
+        <b>只命中一句注释</b>；四次后端调用（<code>api/config</code>、<code>maps/*.json</code>、<code>/api/events</code>、
+        <code>/api/syncMaps</code>）<b>全部是相对路径</b>，因此换任何主机打开都自动指向那台服务器</td></tr>
+    <tr><td>本机拿数据后渲染</td><td><span class="ok">✔ 已满足</span></td>
+        <td>数据经 本机解析 → SSE 广播 → 各浏览器各自渲染；RCS 侧永远只看到<b>一个</b>订阅者，
+        人多也不会给 RCS 加负载（多标签共享同一条订阅）</td></tr>
+  </table>
+  <div class="callout ok"><div class="t">一个容易被忽略的好处</div>
+    RCS 的推送准入是按<b>「发起 Web 登录的那台机器 IP」</b>记录的。既然只有本机登录，
+    那就<b>只有本机需要能连 RCS、只有本机需要在 RCS 侧"有位置"</b>；其它主机哪怕是普通办公机、
+    装不了 RCS 客户端、不在任何白名单里，只要能访问本机 8899 就能看监控。
+  </div>
+  <h3>7.1 本轮为「对外提供服务」补齐的运维面</h3>
+  <p>架构本身不用改，缺的是把它当服务交付出去时该有的东西，全部落在 <code>config.py</code> + <code>server.py</code>：</p>
+  <table>
+    <tr><th style="width:32%">新增</th><th>说明</th></tr>
+    <tr><td class="mono">启动横幅</td>
+        <td>直接打印<b>可分发给他人的 URL</b>：自动探测非 127 网卡（优先选通往 RCS 的那块），
+        并给出监听地址、访问控制状态、同步节流值。实测输出：
+        <span class="mono">其它主机 http://本机ip:8898/?map=BB</span></td></tr>
+    <tr><td class="mono">ACCESS_KEY</td>
+        <td>可选访问密钥（默认空＝开放，内网零门槛）。首次 <code>?k=密钥</code> 打开后服务端下发 cookie（一年），
+        之后刷新/收藏都不用再带；<code>/api/*</code> 与 SSE 一并受控。未带密钥时返回一页中文提示而不是空白</td></tr>
+    <tr><td class="mono">ALLOW_IPS</td>
+        <td>可选来源限制，<b>写法即语义</b>：写完整地址＝精确、以点结尾＝匹配整段（如 <code>"client-ip."</code>）、
+        不完整且无结尾点＝宽容前缀</td></tr>
+    <tr><td class="mono">SYNC_MIN_INTERVAL_S</td>
+        <td>「同步地图」节流（默认 30s）。这项是被"对外服务"逼出来的真实风险：
+        多人同时连点按钮是常态，而每次同步要登录 CMS <b>两次</b>，刷太快会把 <code>admin</code> 账号刷到锁定</td></tr>
+    <tr><td class="mono">CLIENT_QUEUE_MAX</td>
+        <td>每个浏览器连接的服务端待发队列上限（满则丢帧），慢客户端不拖垮推送</td></tr>
+    <tr><td class="mono">接入/断开日志</td>
+        <td>每次浏览器接入/断开打印来源 IP 与当前连接数，可直接确认"现在有几台在看"</td></tr>
+    <tr><td class="mono">环境变量覆盖</td>
+        <td><code>AGV_WEB_BIND / AGV_WEB_PORT / AGV_ACCESS_KEY / AGV_ALLOW_IPS</code>，
+        便于容器、临时实例与自动化测试；<b>默认值仍只定义在 config.py 一处</b></td></tr>
+  </table>
+  <h3>7.2 过程中发现并修掉的两个「我自己引入」的缺陷</h3>
+  <div class="callout bad"><div class="t">这两个值得记下来，都是自查时靠"接口真的通不通"抓到的</div>
+    <ol>
+      <li><b>门禁函数语义反转</b>：<code>_gate()</code> 约定"返回 True＝已拦截"，但<b>放行分支也写了 return True</b>，
+        结果是：请求既不报错、也不返回任何内容——连接建立后被静默关闭。
+        典型症状是 <code>curl</code> 报 <code>Empty reply from server</code> 而服务端<b>一条日志都没有</b>；
+        若不是逐个端点实测，这种"静默吞掉全部请求"极易被误判成网络问题。</li>
+      <li><b>降噪函数挂错了类</b>：上一轮为屏蔽断连堆栈加的 <code>handle_error</code> 写在了 handler 上，
+        而 <code>socketserver</code> 调用的是 <b>server 实例</b>的 <code>handle_error</code>——
+        那段代码是死代码，等于白加。已改为继承 <code>ThreadingHTTPServer</code> 覆写。</li>
+      <li>另外把 IP 白名单的 <code>startswith</code> 误放行修掉了：原先「精确」写法实际按前缀匹配，
+        会连带放行同前缀的邻居地址（如以 8 结尾的写法顺带放行了 80 结尾），现已按写法区分精确/前缀。</li>
+    </ol>
+  </div>
+  <h3>7.3 验证</h3>
+  <ul>
+    <li><b>开放模式</b>：<code>/api/config</code> <code>/</code> <code>/status.js</code> <code>/api/snapshot</code> 全部 200；
+        <code>/config.py</code> 仍 404。</li>
+    <li><b>密钥模式</b>（实测）：无密钥 <code>/</code> <code>/api/config</code> <code>/api/events</code> → 全部 <b>401</b>；
+        错密钥 → <b>401</b>；正确密钥 → <b>200</b> 且下发
+        <span class="mono">Set-Cookie: agv_key=…; Path=/; Max-Age=31536000; SameSite=Lax</span>；
+        带 cookie → 全部 <b>200</b>，SSE 正常收到真实推送。</li>
+    <li><b>IP 白名单</b>：不匹配来源全部 <b>403</b>；匹配规则 13 组用例（含"精确不误伤邻居"）全过，
+        已并入 <code>_dev/_config_test.py</code> 长期看护。</li>
+    <li><b>同步节流</b>：首次同步真的从现场 CMS 拉回 4 张图（BB 389 节点/428 边、CC 661/677、DD 1065/1072、EE 576/602），
+        紧接着第二次请求被正确拦下并返回 <span class="mono">同步过于频繁，30 秒后再试</span>。</li>
+    <li><b>回归</b>：5 组离线用例全过；<code>_live_test.js</code> 真实数据端到端 <b>LIVE PASS</b>。</li>
+  </ul>
+
+  <div class="foot">
+    审核与修复：AutoClaw · 2026-09-12 ·
+    真实数据来自现场 RCS-2000（本机直连 6990/8790 推送通道，抓取时段 09:51–09:56）·
+    未安装浏览器自动化工具（需额外下载约 500MB Chromium，未擅自改动环境），
+    页面视觉表现请按惯例在本地重编后截图复核；逻辑正确性已由上述 5 组自动化用例覆盖。
+  </div>
+</div>
+</body>
+</html>

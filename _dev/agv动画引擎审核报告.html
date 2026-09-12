@@ -63,7 +63,7 @@
   </div>
 
   <h2><span class="no">01</span>设计意图还原</h2>
-  <p>系统链路：RCS-2000（192.0.2.31:8083）→ 本地代理 server.py（静态页 + 状态转发）→ 前端每 5s 轮询 <code>queryAgvStatus</code>，在 Canvas 拓扑图上渲染车辆。动画的关键前提来自现场实测（_dev/RCS-2000_未公开接口补充.md A6）：</p>
+  <p>系统链路：RCS-2000（rcs-ip:8083）→ 本地代理 server.py（静态页 + 状态转发）→ 前端每 5s 轮询 <code>queryAgvStatus</code>，在 Canvas 拓扑图上渲染车辆。动画的关键前提来自现场实测（_dev/RCS-2000_未公开接口补充.md A6）：</p>
   <ul>
     <li><code>path</code> 字段<b>不是规划路线，而是本次任务已走过的历史轨迹</b>（首点=任务起点、尾点≈当前位置、任务完成即清空）；</li>
     <li>真实坐标 <code>posX/posY</code> 来自二维码栅格定位，精度高但 5s 才一帧；<code>speed</code> / <code>robotDir</code> 为采样时刻瞬时值；</li>

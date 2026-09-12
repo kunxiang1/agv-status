@@ -1,10 +1,13 @@
 # re-verify undocumented endpoints before writing the doc (fresh evidence, not memory)
-import os, urllib.request, urllib.parse, http.cookiejar, hashlib, json, time
+import urllib.request, urllib.parse, http.cookiejar, hashlib, json, time, os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config as C                                   # 环境值唯一来源：config.py
 
 UA = {'User-Agent': 'Mozilla/5.0', 'X-Requested-With': 'XMLHttpRequest'}
 cj = http.cookiejar.CookieJar()
 op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-B = os.environ.get('RCS_WEB', 'http://127.0.0.1:8181')
+B = C.WEB_BASE
 
 def P(u, d=None, get=False, full=False):
     body = None if get or d is None else urllib.parse.urlencode(d).encode()
@@ -17,15 +20,15 @@ def P(u, d=None, get=False, full=False):
 
 print('== login (form, sha256 pw) ==')
 print(P('/rcms/web/login.login.action'.replace('login.login', 'login/login'),
-      {'ecsUserName': os.environ['RCS_USER'], 'ecsPassword': hashlib.sha256(os.environ['RCS_PWD'].encode()).hexdigest(), 'pwdSafeLevelLogin': '0'})[:60],
+      {'ecsUserName': C.RCS_USER, 'ecsPassword': C.sha256_pwd(), 'pwdSafeLevelLogin': '0'})[:60],
       [c.name for c in cj])
 
 print('== wrong password ==')
 try:
-    print(P('/rcms/web/login/login.action', {'ecsUserName': os.environ['RCS_USER'], 'ecsPassword': 'deadbeef', 'pwdSafeLevelLogin': '0'})[:200])
+    print(P('/rcms/web/login/login.action', {'ecsUserName': 'admin', 'ecsPassword': 'deadbeef', 'pwdSafeLevelLogin': '0'})[:200])
 except Exception as e: print('ERR', e)
 # re-login
-P('/rcms/web/login/login.action', {'ecsUserName': os.environ['RCS_USER'], 'ecsPassword': hashlib.sha256(os.environ['RCS_PWD'].encode()).hexdigest(), 'pwdSafeLevelLogin': '0'})
+P('/rcms/web/login/login.action', {'ecsUserName': C.RCS_USER, 'ecsPassword': C.sha256_pwd(), 'pwdSafeLevelLogin': '0'})
 
 print('== findByElcMapCode missing param ==')
 print(P('/rcms/web/elcMap/findByElcMapCode.action', {})[:150])
@@ -59,8 +62,8 @@ r, b = P('/rcms/web/mapData/export.action', {'mapCode': 'BB', 'exportCookieId': 
 print('minimal params ->', r.status, len(b), dict(r.headers).get('Content-Disposition'))
 
 print('== queryAgvStatus extra fields ==')
-req = urllib.request.Request(os.environ.get('RCS_DPS', 'http://127.0.0.1:8083') + '/rcms-dps/rest/queryAgvStatus',
-                             data=json.dumps({'reqCode': 'v1', 'mapShortName': 'BB'}).encode(),
+req = urllib.request.Request('http://%s:%d/rcms-dps/rest/queryAgvStatus' % (C.RCS_WEB_IP, C.PORT_REST),
+                             data=json.dumps({'reqCode': 'v1', 'mapShortName': C.DEFAULT_MAP}).encode(),
                              headers={'Content-Type': 'text/plain'})
 j = json.loads(urllib.request.urlopen(req, timeout=10).read())
 a = j['data'][0] if j['data'] else {}
