@@ -110,7 +110,7 @@ const RESYNC_DIST=8;       // 积压弧长>此值(m)=渲染确实停过：就地
 
 // ---------- 状态 ----------
 let map=null, sel=null, agvs=new Map();
-let view={x:0,y:0,s:1}, drag=null, fitS=1;
+let view={x:0,y:0,s:1}, drag=null;
 const cv=document.getElementById("cv"), ctx=cv.getContext("2d");
 const $=id=>document.getElementById(id);
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
@@ -161,16 +161,11 @@ function fitView(){
   const[bx0,by0,bx1,by1]=map.bbox, W=cv.width/dpr, H=cv.height/dpr, pad=40;
   // cover:铺满画布(地图竖、视口横时不再缩成一小块),溢出部分拖动查看
   const s=Math.max((W-2*pad)/Math.max(bx1-bx0,1),(H-2*pad)/Math.max(by1-by0,1));
-  fitS=s;                                        // 记为 1x 基准，供缩放限位/视角回收使用
   view={s,x:W/2-(bx0+bx1)/2*s,y:H/2+(by0+by1)/2*s};
 }
-function clampView(){                            // 修：缩放限位 + 视角回收，避免滚轮/拖拽把地图丢出屏幕
-  if(!map)return;
-  const W=cv.width/dpr,H=cv.height/dpr,[bx0,by0,bx1,by1]=map.bbox,s=view.s;
-  const spanX=(bx1-bx0)*s,spanY=(by1-by0)*s;
-  view.x=spanX>=W?clamp(view.x,W-bx1*s,-bx0*s):clamp(view.x,-bx0*s,W-bx1*s);   // 屏内横向留白/覆盖规则
-  view.y=spanY>=H?clamp(view.y,H+by0*s,by1*s):clamp(view.y,by1*s,H+by0*s);     // y 轴屏幕反向(y=-my*s+view.y)
-}
+// 视角不设边界锁：滚轮/拖拽可以自由把地图移出屏幕边界。
+// （曾加过"防丢图"限位，实测反而挡住看边角——想看清某个角落时必须能把地图拖过去，
+//   所以整块撤掉。要回到全图视图，切一次地图或缩放窗口即可。）
 function drawLegend(){
   const types=[...new Set(map.nodes.map(n=>n[3]))].sort((a,b)=>a-b);
   const seen=new Set(), items=[];
@@ -593,14 +588,13 @@ $("sync").onclick=async()=>{
   sseConnect();
 })();
 cv.onwheel=e=>{e.preventDefault();
-  const f=e.deltaY<0?1.15:1/1.15,[mx,my]=[e.offsetX,e.offsetY];
-  const ns=clamp(view.s*f,fitS/8,fitS*8),k=ns/view.s;    // 修：缩放上下限，避免滚轮把地图滚成无穷/一个点
-  view.x=mx-(mx-view.x)*k; view.y=my-(my-view.y)*k; view.s=ns; clampView();};
+  const f=e.deltaY<0?1.15:1/1.15, [mx,my]=[e.offsetX,e.offsetY];
+  view.x=mx-(mx-view.x)*f; view.y=my-(my-view.y)*f; view.s*=f;};   // 缩放不设上下限、不回收视角
 let downXY=null;                                   // 拖地图误触保护:位移>5px 不算点击
 cv.onmousedown=e=>{downXY=[e.clientX,e.clientY];drag=[e.clientX,e.clientY];cv.style.cursor="grabbing";e.preventDefault();};
 addEventListener("mousemove",e=>{                  // 修：拖拽挂在 window 上——指针移出画布再回来不再跳变
   if(!drag)return;
-  view.x+=e.clientX-drag[0];view.y+=e.clientY-drag[1];drag=[e.clientX,e.clientY];clampView();});
+  view.x+=e.clientX-drag[0];view.y+=e.clientY-drag[1];drag=[e.clientX,e.clientY];});
 addEventListener("mouseup",()=>{drag=null;cv.style.cursor="";});
 cv.onmousemove=e=>{
   const hit=hitAgv(e.offsetX,e.offsetY), tip=$("tip");
@@ -645,7 +639,7 @@ function renderList(){
   document.querySelectorAll(".row[data-id]").forEach(el=>el.onclick=()=>{
     sel=el.dataset.id;const a=agvs.get(sel);
     if(a&&map){const[px,py]=P(a.x,a.y),W=cv.width/dpr,H=cv.height/dpr;
-      view.x+=W/2-px;view.y+=H/2-py;clampView();}
+      view.x+=W/2-px;view.y+=H/2-py;}       // 居中选中车：不加边界回收，边角车也能居中
     renderList();renderDetail();});
 }
 function renderDetail(){

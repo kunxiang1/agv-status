@@ -182,9 +182,10 @@
     <tr><td class="mono">B7</td><td><span class="sev s2">中·兼容</span></td>
         <td>车形圆角依赖 <code>ctx.roundRect</code>，缺该 API 的内核会让<b>每一帧渲染都抛异常</b>→ 整张地图空白</td>
         <td><code>rr()</code> 增加 <code>arcTo</code> 降级实现</td></tr>
-    <tr><td class="mono">B8</td><td><span class="sev s3">低·交互</span></td>
-        <td>滚轮可把地图缩到无穷大/无穷小；拖拽能把地图完全拖出屏幕，没有任何回位手段</td>
-        <td>缩放限位到 1x 基准的 1/8～8 倍；新增 <code>clampView()</code> 按"地图大于视口则不许露边、小于视口则不许出框"回收视角；选中车辆居中后同样回收</td></tr>
+    <tr><td class="mono">B8</td><td><span class="sev s3">低·交互</span> <span class="sev s1">已撤销</span></td>
+        <td>滚轮可把地图缩到无穷大/无穷小；拖拽能把地图完全拖出屏幕</td>
+        <td>曾加"缩放限位 + <code>clampView()</code> 视角回收"来防丢图，<b>实测反而挡住看边角</b>：想看清某个角落时必须能把地图拖过去，加了限位就"移不动"了，体验更差
+        → <b>已按用户要求整体撤销</b>，恢复自由拖拽/缩放（含选中车辆居中的回收也一并去掉）。此处保留记录，避免以后又"好心"加回来</td></tr>
     <tr><td class="mono">B9</td><td><span class="sev s3">低·交互</span></td>
         <td>拖拽用画布内 <code>offsetX/Y</code>：指针移出画布再移回，视角按进出点之差<b>突然跳变</b></td>
         <td>拖拽改挂 <code>window</code> 并用 <code>clientX/Y</code>，出画布不再丢帧；顺带修掉拖动时误弹提示框</td></tr>
@@ -234,7 +235,8 @@
     <tr><th style="width:26%">文件</th><th>变更</th></tr>
     <tr><td class="mono">config.py <span class="sev s3">新增</span></td><td>唯一配置源（含派生辅助函数）</td></tr>
     <tr><td class="mono">index.html</td><td>配置改由 /api/config 下发；动画引擎抽出 <code>stepAgv/resyncAgv</code> 并加挂起收敛与积压兜底；
-        ingest 加节奏 EMA 防污染；DPR 动态、roundRect 降级、视角限位回收、拖拽坐标修正、空指针与徽标残留修复</td></tr>
+        ingest 加节奏 EMA 防污染；DPR 动态、roundRect 降级、拖拽坐标修正、空指针与徽标残留修复
+        （视角限位回收已按用户反馈撤销，见 B8）</td></tr>
     <tr><td class="mono">server.py</td><td>接入 config；新增 <code>/api/config</code>；静态后缀白名单；单帧异常隔离；断连降噪；句柄与端口加固</td></tr>
     <tr><td class="mono">rcs_push.py</td><td>接入 config；<code>_recv_exact</code> 修短读；登录失败长退避；JSON 判成功</td></tr>
     <tr><td class="mono">parse_map.py</td><td>接入 config；写文件改 with</td></tr>
