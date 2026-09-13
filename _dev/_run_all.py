@@ -13,7 +13,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEV = os.path.join(ROOT, "_dev")
 
-PY_CASES = [("配置集中化", "_config_test.py"), ("货架清单译码与落点", "_pods_test.py")]
+PY_CASES = [("配置集中化", "_config_test.py"), ("货架清单译码与落点", "_pods_test.py"),
+            ("非阻塞日志（控制台冻结）", "_stdout_test.py"), ("按图分组订阅", "_fanout_test.py")]
 JS_CASES = [("动画引擎 12 组纯逻辑", "_nav_test.js"),
             ("后台恢复不补帧冲刺", "_resume_test.js"),
             ("启动链路无头集成", "_boot_test.js"),

@@ -13,6 +13,50 @@ import config as C
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+
+
+class _AsyncWriter:
+    """把 stdout/stderr 变成非阻塞写：只入有界队列，由后台线程真正写出去。
+
+    为什么需要：Windows 控制台开着「快速编辑模式」时，**用鼠标选中文字会让进程挂起**
+    （不是 Python 的问题）。本服务每帧都会打印（浏览器接入/断开、货架表变化），
+    一旦挂起，订阅线程与 SSE 线程就被 print 拖住 → 前端集体卡在"连接中"、日志停住，
+    按一下回车才恢复。换成异步写之后，控制台冻结最多丢几行日志，服务照常推送。
+    """
+
+    def __init__(self, raw, name, maxlen=4000):
+        self.raw, self.name = raw, name
+        self.q = queue.Queue(maxlen)
+        self.dropped = 0
+        self.lock = threading.Lock()
+        threading.Thread(target=self._run, daemon=True, name="log-" + name).start()
+
+    def _run(self):
+        while True:
+            s = self.q.get()
+            try:
+                self.raw.write(s)
+                self.raw.flush()
+            except Exception:
+                pass                                  # 控制台真没了（窗口被关）也不许崩
+
+    def write(self, s):
+        try:
+            self.q.put_nowait(s)
+        except queue.Full:
+            with self.lock:
+                self.dropped += 1                         # 冻结期间丢弃：宁可少日志，也不能停服务
+
+    def flush(self):
+        pass
+
+
+def install_async_log():
+    """把全局 stdout/stderr 换成非阻塞写（只在真正启动服务时安装，不影响 import 本模块的测试）。"""
+    sys.stdout = _AsyncWriter(sys.stdout, "out")
+    sys.stderr = _AsyncWriter(sys.stderr, "err")
+
+
 CMS = C.WEB_BASE                                   # Web CMS，拓扑地图源（base64+gzip XML）
 CMS_USER, CMS_PWD = C.RCS_USER, C.RCS_PWD
 MAP_CODES = C.MAP_CODES
@@ -44,14 +88,27 @@ _sync_at = 0.0                           # 上次成功/失败发起同步的时
 _pods_lock = threading.Lock()
 _pods_at = 0.0                           # 上次「同步货架」发起时刻（按钮节流用）
 
-_latest = {}                             # robotCode -> REST 形状行（ROBOT_PATH 合并 path；仅 /api/snapshot 调试用）
+_latest = {}                             # robotCode -> REST 形状行（ROBOT_PATH 合并 path；snapshot 与"接上就出车"用）
 _latest_lock = threading.Lock()
-_clients = set()
+_clients = {}                            # 订阅分组：图码 -> {queue,...}；键 "" = 订阅全部（缺省/无地图事件）
 _clients_lock = threading.Lock()
+
+
+def route_keys(ev_map):
+    """事件该投给哪些分组：返回键集合，None = 全部（不分组 / 事件与地图无关）。纯函数，供测试。"""
+    if not C.SSE_GROUP_BY_MAP or not ev_map:
+        return None                      # 不分组，或货架表等系统级事件 → 发给所有人
+    return ("", ev_map)                  # 订阅"全部"的 + 订阅该图的
+
+
 def bcast(obj):
     s = json.dumps(obj, ensure_ascii=False)
+    keys = route_keys(rcs_push.event_map(obj)) if isinstance(obj, dict) else None
     with _clients_lock:
-        qs = list(_clients)
+        if keys is None:
+            qs = [q for st in _clients.values() for q in st]
+        else:
+            qs = [q for k in keys for q in _clients.get(k, ())]
     for q in qs:
         try: q.put_nowait(s)
         except queue.Full: pass           # 慢客户端丢帧，宁丢勿堵
@@ -169,10 +226,15 @@ class H(BaseHTTPRequestHandler):
 
     def _sse(self):
         ip = self.client_address[0]
+        # 订阅分组：?map=BB 只推 BB 的事件；不带、或不是配置里的图 → 订阅全部（兼容默认）
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        want = (query.get("map") or [""])[0].strip()
+        key = want if (want in MAP_CODES) else ""
         q = queue.Queue(C.CLIENT_QUEUE_MAX)
         with _clients_lock:
-            _clients.add(q); n = len(_clients)
-        print("浏览器接入 %s（当前 %d 个连接）" % (ip, n), flush=True)
+            _clients.setdefault(key, set()).add(q)
+            n = sum(len(v) for v in _clients.values())
+        print("浏览器接入 %s（订阅 %s，当前 %d 个连接）" % (ip, key or "全部", n), flush=True)
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -180,6 +242,8 @@ class H(BaseHTTPRequestHandler):
             self.send_header("X-Accel-Buffering", "no")   # 经 nginx 等反代时禁用缓冲，保证逐帧送达
             self.end_headers()
             self.wfile.write(b":ok\n\n")
+            for s in self._snapshot(key):                 # 接上就先把当前画面发过去，不用等下一帧
+                self.wfile.write(b"data: " + s.encode("utf-8") + b"\n\n")
             while True:
                 try:
                     d = q.get(timeout=15)
@@ -190,8 +254,23 @@ class H(BaseHTTPRequestHandler):
             pass                                          # 浏览器断开
         finally:
             with _clients_lock:
-                _clients.discard(q); n = len(_clients)
-            print("浏览器断开 %s（当前 %d 个连接）" % (ip, n), flush=True)
+                st = _clients.get(key)
+                if st:
+                    st.discard(q)
+                    if not st: _clients.pop(key, None)
+                n = sum(len(v) for v in _clients.values())
+            print("浏览器断开 %s（订阅 %s，当前 %d 个连接）" % (ip, key or "全部", n), flush=True)
+
+    @staticmethod
+    def _snapshot(key):
+        """刚接上的订阅者先补一份"当前画面"：该图每台车的最新帧（货架表本来就有全量，不用补）。"""
+        out = []
+        with _latest_lock:
+            rows = list(_latest.values())
+        for a in rows:
+            if not key or a.get("mapCode") == key:
+                out.append(json.dumps({"e": "status", "a": a}, ensure_ascii=False))
+        return out
 
     def do_GET(self):
         self._setkey = False
@@ -260,6 +339,9 @@ class Srv(ThreadingHTTPServer):
     """注意：process_request_thread 调的是 **server 实例** 的 handle_error，
     挂在 handler 上是死代码——降噪必须挂在这里。"""
     daemon_threads = True
+    # 监听握手队列：socketserver 默认只有 5！多人同时打开页面（或推送断线后的重连风暴）
+    # 会直接把多出来的连接拒掉（实测 1000 并发被拒 191 个 ConnectionRefusedError）。
+    request_queue_size = 256
 
     def handle_error(self, request, client_address):
         e = sys.exc_info()[1]
@@ -305,8 +387,13 @@ def startup_banner():
     if C.ALLOW_IPS:
         L.append("  来源限制    %s" % ", ".join(C.ALLOW_IPS))
     L.append("  地图同步    两次间隔不小于 %ds；推送断了本进程自动重登重连" % C.SYNC_MIN_INTERVAL_S)
+    L.append("  控制台      Windows 选中控制台文字会暂停进程（日志停住 + 前端卡在「连接中」）；"
+             "本服务已改异步日志，冻结时最多丢几行日志、不影响推送")
     L.append("  货架↔储位  启动校准一次；取/放货按推送增量维护；「同步货架」按钮人工校准"
              "（需本机在 RCS 允许配置IPs 内）")
+    L.append("  推送订阅    %s" % ("按图分组（浏览器只收本图事件；不带 ?map= 或非配置图＝订阅全部）"
+                                  if C.SSE_GROUP_BY_MAP else
+                                  "全量广播（每台客户端都收四张图的事件；config.SSE_GROUP_BY_MAP=False）"))
     L.append("=" * 74)
     L.append("提示：其它主机无需访问 RCS 的 6990/8790，也无需被 RCS 登记白名单"
              "（白名单按发起登录的机器 IP 记录，只有本机需要能连 RCS）。")
@@ -314,6 +401,7 @@ def startup_banner():
 
 
 if __name__ == "__main__":
+    install_async_log()          # 先装非阻塞日志：控制台被「快速编辑」冻结时也不会拖住推送
     for ip, port in C.push_targets():
         t = threading.Thread(target=sub_loop, args=(ip, port), daemon=True, name="sub%d" % port)
         t.start()

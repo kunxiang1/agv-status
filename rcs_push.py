@@ -146,10 +146,15 @@ def parse_frame(body):
     return []
 
 
+def event_map(o):
+    """事件属于哪张图：status 在 a.mapCode，path/offline/alarm 在 map。取不到返回 ""（＝与地图无关，
+    如系统级事件；货架表 pods 事件也走这条）——调用方对 "" 一律当"发给所有订阅者"。纯函数，供测试。"""
+    return o.get("map") or (o.get("a") or {}).get("mapCode") or ""
+
+
 if __name__ == "__main__":
     want = sys.argv[1] if len(sys.argv) > 1 else None
     for body in iter_msgs(RCS_ENGINE, C.PORT_PUSH):
         for o in parse_frame(body):
-            m = o.get("map") or (o.get("a") or {}).get("mapCode") or ""
-            if want and m != want: continue
+            if want and event_map(o) != want: continue
             print(json.dumps(o, ensure_ascii=False), flush=True)

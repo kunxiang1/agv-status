@@ -124,12 +124,17 @@ const $=id=>document.getElementById(id);
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 
 // ---------- 地图加载 ----------
+const MAPCACHE={};                                 // 已加载地图的内存缓存：来回切图 0 网络、0 解析
 async function loadMap(qr){
-  const r=await fetch("maps/"+qr+".json"); const m=await r.json();
-  m.nodeMap={}; m.nodes.forEach(n=>m.nodeMap[n[0]]=n);
-  m.adj={}; m.edges.forEach(([a,b])=>{(m.adj[a]??=[]).push(b);(m.adj[b]??=[]).push(a);});
-  const xs=m.nodes.map(n=>n[1]), ys=m.nodes.map(n=>n[2]);
-  m.bbox=[Math.min(...xs),Math.min(...ys),Math.max(...xs),Math.max(...ys)];
+  let m=MAPCACHE[qr];
+  if(!m){                                          // 只有首次载入某图才真正拉本机静态文件 maps/<qr>.json
+    const r=await fetch("maps/"+qr+".json"); m=await r.json();
+    m.nodeMap={}; m.nodes.forEach(n=>m.nodeMap[n[0]]=n);
+    m.adj={}; m.edges.forEach(([a,b])=>{(m.adj[a]??=[]).push(b);(m.adj[b]??=[]).push(a);});
+    const xs=m.nodes.map(n=>n[1]), ys=m.nodes.map(n=>n[2]);
+    m.bbox=[Math.min(...xs),Math.min(...ys),Math.max(...xs),Math.max(...ys)];
+    MAPCACHE[qr]=m;
+  }
   map=m; fitView(); drawLegend();
 }
 // 断帧补间不许斜穿:两端吸附最近节点,中间沿边走 BFS 最短路(路网全是直角边);
@@ -282,11 +287,19 @@ function handleAlarm(m){                  // 活动告警四道闸门，过不�
   renderAlarms();
 }
 function sseConnect(){
-  const es=new EventSource("/api/events");
+  if(esT.es){try{esT.es.close();}catch(e){}}        // 重新订阅前先关旧的，避免两条流并存
+  const es=new EventSource("/api/events?map="+encodeURIComponent(curMap));   // 按图分组订阅：只收本图事件
   esT.es=es;
+  // 5s 还没握上手 → 在状态位给出最可能的原因（后端控制台被「快速编辑」暂停是头号嫌疑）
+  const slow=setTimeout(()=>{
+    if(es.readyState!==1){
+      const s=$("src");s.textContent="连接中…";
+      s.title="后端没响应。若后端跑在 Windows 控制台里、你选中了窗口里的文字，进程会被系统暂停——按一下回车即可恢复。";
+    }
+  },5000);
   es.onmessage=e=>{esT.last=Date.now();try{handle(JSON.parse(e.data));if(!msgOk)$("msg").style.display="none";}catch(err){}};
-  es.onopen=()=>{esT.last=Date.now();$("src").textContent="推送";};
-  es.onerror=()=>{$("src").textContent="断线";es.close();setTimeout(sseConnect,2000);};   // 只重连本机 server；RCS 断线由 server 重登重连
+  es.onopen=()=>{clearTimeout(slow);esT.last=Date.now();const s=$("src");s.textContent="推送";s.title="";};
+  es.onerror=()=>{clearTimeout(slow);$("src").textContent="断线";es.close();setTimeout(sseConnect,2000);};   // 只重连本机 server；RCS 断线由 server 重登重连
 }
 const esT={last:0,es:null};
 function renderAlarms(){
@@ -620,9 +633,10 @@ async function loadPods(){                         // 货架表兜底轮询（�
   try{const r=await fetch("api/pods",{cache:"no-store"});
     if(r.ok){const j=await r.json();PODS=j.pods||{};drawLegend();}}catch(e){}
 }
-async function switchMap(qr){                      // 换图：清车 → 载新图；失败给出提示而不是空图
+async function switchMap(qr){                      // 换图：清车 → 载新图 → 订阅跟着切；失败给出提示而不是空图
   curMap=qr;agvs.clear();sel=null;renderList();renderDetail();
   try{await loadMap(curMap);}catch(e){showMsg("地图加载失败:"+e.message);}
+  if(esT.es)sseConnect();                          // 分组订阅：换图＝换订阅（服务端会先补发本图当前快照）
 }
 $("sync").onclick=async()=>{
   const b=$("sync");b.disabled=true;b.textContent="⟳ 同步中...";
@@ -630,6 +644,7 @@ $("sync").onclick=async()=>{
     const r=await fetch("/api/syncMaps",{method:"POST"});
     const j=await r.json();
     b.textContent=j.err?("⚠ "+j.err.slice(0,30)):"✓ 已同步 "+Object.keys(j.ok).length+" 图";
+    Object.keys(MAPCACHE).forEach(k=>delete MAPCACHE[k]);   // 地图已重拉：内存缓存必须失效，否则切图看到旧图
     await loadMap(curMap);                       // 重新拉取当前图 JSON
     loadPods();                                  // 服务端已顺手重拉货架清单：前端跟一次
   }catch(e){b.textContent="⚠ 同步失败";}

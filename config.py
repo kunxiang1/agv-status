@@ -41,6 +41,11 @@ ALLOW_IPS = []                  # 非空＝只接受这些来源 IP。写法即�
 SYNC_MIN_INTERVAL_S = 30        # 两次「同步地图」最小间隔：多人同时连点是常态，而每次同步
                                 # 要登录 CMS 两次，刷太快会把 admin 账号刷到锁定
 CLIENT_QUEUE_MAX = 2000         # 每个浏览器连接的服务端待发队列上限（满则丢帧，慢客户端不拖垮推送）
+SSE_GROUP_BY_MAP = True         # SSE 按图分组订阅：前端连 /api/events?map=BB，只推该图事件
+                                # （看不到的图推过去就是白费流量与 CPU；四图全推＝4 倍浪费）
+                                # 无地图字段的事件（货架表 pods/系统级）照旧发给所有人；
+                                # 不带 ?map= 或 map 不在 MAP_CODES 时＝订阅全部（兼容默认与"全厂总览"用）
+                                # 关掉此项＝行为与不分组完全一致（回退开关）
 
 # 货架↔储位表（REST 全量基线 hikRpcService/queryPodBerthAndMat，按地图逐张拉）：
 # 只在启动时全量校准一次；取/放货不重拉——6990 推送的 podCode 变化就是全部事实，服务端

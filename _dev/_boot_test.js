@@ -50,7 +50,9 @@ const PODS_PAYLOAD=loadPodsPayload();
 function fakeFetch(url){
   fetched.push(url);
   if(url==='api/config')return Promise.resolve({ok:true,json:()=>Promise.resolve(CONFIG)});
-  if(url==='maps/BB.json')return Promise.resolve({ok:true,json:()=>Promise.resolve(BB)});
+  const mm=/^maps\/([A-Z]+)\.json$/.exec(url);            // 任意地图都从磁盘读真实文件
+  if(mm)return Promise.resolve({ok:true,json:()=>Promise.resolve(
+    JSON.parse(fs.readFileSync(path.join(ROOT,'maps',mm[1]+'.json'),'utf8')))});
   if(url==='api/pods')return Promise.resolve({ok:true,json:()=>Promise.resolve(PODS_PAYLOAD)});
   return Promise.resolve({ok:true,json:()=>Promise.resolve({ok:{},err:null})});
 }
@@ -62,6 +64,7 @@ const sandbox={
   requestAnimationFrame:cb=>{rafQueue.push(cb);return rafQueue.length;},
   setInterval:(fn,ms)=>{timers.push([fn,ms]);return timers.length;},
   setTimeout:(fn,ms)=>{timers.push([fn,ms]);return timers.length;},
+  clearTimeout:noop,clearInterval:noop,
   performance:{now:()=>0},
   addEventListener:noop,removeEventListener:noop,
   location:{search:'',href:'http://127.0.0.1:8899/'},
@@ -88,8 +91,21 @@ catch(e){ ok(false,'脚本执行抛异常: '+e.message); process.exit(1); }
   ok(fetched.includes('maps/BB.json'),'必须按配置的默认图载入地图 JSON（实际 '+fetched.join(',')+'）');
   ok(fetched.includes('api/pods'),'启动链必须拉取货架清单（实际 '+fetched.join(',')+'）');
   ok((el('legend')._h||'').includes('货架'),'货架清单就位后图例必须出现「货架」计数（实际 '+(el('legend')._h||'').slice(-80)+'）');
-  ok(esInstances.length===1&&esInstances[0].url==='/api/events',
-     '载图成功后必须建立 SSE 连接（实际 '+esInstances.length+'）');
+  ok(esInstances.length===1&&esInstances[0].url==='/api/events?map=BB',
+     '载图成功后必须建立「按图分组」的 SSE 订阅（实际 '+(esInstances[0]||{}).url+'）');
+  let oerr=null;                                   // 握手成功路径：状态位应变「推送」且不抛异常
+  try{ esInstances[0].onopen&&esInstances[0].onopen({}); }catch(e){ oerr=e; }
+  ok(!oerr&&(el('src').textContent||'')==='推送','SSE 握手成功后状态位应显示「推送」（实际「'+el('src').textContent+'」）'+
+     (oerr?' 异常：'+oerr.message:''));
+
+  // ---- 换图：订阅跟着换（分组订阅），且地图走内存缓存不再重复拉 ----
+  const bbFetches=()=>fetched.filter(u=>u==='maps/BB.json').length;
+  await ctx.switchMap('CC');
+  ok(esInstances.length===2&&esInstances[1].url==='/api/events?map=CC',
+     '换图后应重新订阅新图（实际 '+(esInstances[1]||{}).url+'）');
+  await ctx.switchMap('BB');
+  ok(esInstances.length===3&&esInstances[2].url==='/api/events?map=BB','换回原图应再订一次 BB');
+  ok(bbFetches()===1,'地图内存缓存生效：来回切图不应重复拉 maps/BB.json（实际 '+bbFetches()+' 次）');
 
   // ---- 喂一条真实推送状态帧（取自现场快照样本），再跑两帧渲染 ----
   const snap=JSON.parse(fs.readFileSync(path.join(ROOT,'snap_tmp.json'),'utf8'));

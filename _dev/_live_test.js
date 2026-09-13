@@ -94,6 +94,32 @@ function animSteps(a,seconds){                     // 简化 frame 推进：vT=v
       console.log(`  动画终态离上报 ${lastGap.toFixed(2)}m（贴路、单调、无瞬移 ✓）`);}
     cars.set(a.robotCode,a);
   }
-  console.log(bad===0?'LIVE PASS：真实数据全链路（贴路/无瞬移/单调追帧/丢包停等）':`LIVE FAIL ${bad}`);
+  // ---- 断言 D：SSE 按图分组订阅（真连一次 /api/events?map=BB）----
+  // 订阅 BB 就只该收到 BB 的事件，或与地图无关的系统级事件（货架表 pods 等）；收到别的图＝分组失效。
+  try{
+    const ctl=new AbortController();
+    const r=await fetch('http://127.0.0.1:'+PORT+'/api/events?map=BB',{signal:ctl.signal});
+    const rd=r.body.getReader(),dec=new TextDecoder();
+    let buf='',seen=0,alien=[];
+    const t0=Date.now();
+    while(Date.now()-t0<4000&&seen<80){
+      const dv=await rd.read(); if(dv.done) break;
+      buf+=dec.decode(dv.value,{stream:true});
+      let i;
+      while((i=buf.indexOf('\n\n'))>=0){
+        const line=buf.slice(0,i).trim(); buf=buf.slice(i+2);
+        if(!line.startsWith('data: ')) continue;
+        seen++;
+        let o; try{o=JSON.parse(line.slice(6));}catch(e){continue;}
+        const m=o.map||(o.a&&o.a.mapCode)||'';
+        if(m&&m!=='BB') alien.push(m);
+      }
+    }
+    ctl.abort();
+    if(alien.length) fail(`按图分组失效：订阅 BB 却收到 ${alien.length} 条它图事件（如 ${alien[0]}）`);
+    else console.log(`  分组订阅：订阅 BB 共收 ${seen} 条，无它图事件 ✓`);
+  }catch(e){ fail('SSE 分组检查异常: '+e.message); }
+
+  console.log(bad===0?'LIVE PASS：真实数据全链路（贴路/无瞬移/单调追帧/丢包停等/按图分组）':`LIVE FAIL ${bad}`);
   process.exit(bad?1:0);
 })().catch(e=>{console.error('LIVE ERROR',e.message);process.exit(2);});
