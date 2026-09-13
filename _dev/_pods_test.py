@@ -181,7 +181,30 @@ finally:
     with rcs_pods._cache_lock:                       # 还原缓存，不污染其它用例
         rcs_pods._cache.update(json.loads(real_cache))
 
-# ---- 6. payload 快照形状（不触发网络） ----
+# ---- 6. 帧稳定判定 + 落点锚点（note_car_frame）：修「老报落点定不下来」的根因 ----
+rcs_pods._car_state.clear()
+E = rcs_pods.note_car_frame
+check("首帧只登记不产事件", E(7, "L00342", 1000, 2000, "EE") is None)
+check("抖动1帧不产事件", E(7, "", 9000, 9000, "EE") is None)              # 空 1 帧
+check("回到原值即丢弃待定", E(7, "L00342", 9000, 9000, "EE") is None)     # 抖回去
+ev = None
+E(7, "L00342", 1100, 2100, "EE")                                          # 还扛着（停在放货位）
+E(7, "", 9000, 9000, "EE")                                                # 变化第 1 帧
+ev = E(7, "", 9500, 9500, "EE")                                           # 变化第 2 帧 → 确认
+check("稳定2帧才确认为一次放货", ev == ("L00342", "", 1100, 2100, "EE"), "got %r" % (ev,))
+check("落点锚点=变化前一帧（不是已开走的那帧）", ev and ev[2] == 1100 and ev[3] == 2100)
+
+rcs_pods._car_state.clear()
+E(9, "", 0, 0, "BB")
+E(9, "P00281", 5000, 6000, "BB")                                          # 取货第 1 帧
+ev = E(9, "P00281", 5100, 6100, "BB")                                     # 取货第 2 帧 → 确认
+check("取货事件（空→货架）", ev == ("", "P00281", 0, 0, "BB"), "got %r" % (ev,))
+check("确认后不再重复产事件", E(9, "P00281", 5200, 6200, "BB") is None)
+
+check("失败原因可诊断（超半径）", "认可半径" in rcs_pods._why_none("BB", 999.0, 999.0))
+check("失败原因可诊断（图无候选节点）", "没有候选节点" in rcs_pods._why_none("ZZ", 0.0, 0.0))
+
+# ---- 7. payload 快照形状（不触发网络） ----
 snap = rcs_pods.payload()
 check("payload 含 ts/pods/err", set(snap) == {"ts", "pods", "err"})
 

@@ -11,9 +11,10 @@
 后 7 位 = y 毫米，译出的坐标与地图节点完全重合（实测四图 400+ 个全部 0 偏差）。
 
 增量维护（车取/放货，不重拉——6990 推送本身已带全部事实）：
-  推送里某车 podCode 变化 = 一次取或放：
+  推送里某车 podCode 变化 = 一次取或放；变化须连续 _POD_STABLE_FRAMES 帧稳定才认（防推送抖动），
+  且落点用「变化前一帧」的坐标（那帧车还扛着货架、正停在放货位；变化帧的车可能已经在路上）：
     · 出现 podCode（取货）→ 把该货架从表里摘掉（此刻它在车上，前端画在车身上）；
-    · podCode 消失（放货）→ 按车当前坐标定落点：认可半径内取最近候选节点（路径点不算候选），
+    · podCode 消失（放货）→ 认可半径内取最近候选节点（路径点不算候选），
       并要求它比「下一个不同位置」近出决断余量；定不下来就不记（宁缺勿错，靠「同步货架」兜底）。
   全量 REST 只在三处发生：服务启动、前端「同步货架」按钮、同步地图时顺手一次——不做周期校准
   （用户口径：人多时周期请求会平白加重 RCS 负担，而增量维护理论上不会错）。
@@ -59,6 +60,8 @@ _PLACE_MAX_D = 0.5               # 落点认可半径(m)：车坐标到候选节
 _PLACE_MIN_MARGIN = 0.25         # 决断余量(m)：最近点须比"下一个不同位置"至少近这么多
 _PLACE_SAME_SPOT = 0.3           # 相距 <该值(m) 的节点视为同一位置（实测有成对 0.08m 的节点）
 _PATH_TYPE = 16                  # 路径点=路网上的点，货架不会停在这（实测 420 条落点无一在 16 类）
+_POD_STABLE_FRAMES = 2           # podCode 变化须连续这么多帧稳定才认（防推送瞬时抖动被当成一次取放）
+_SKIP_LOG_MIN_S = 60             # 同一个货架「落点定不下来」告警的最小间隔秒（防刷屏）
 
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # 内网直连，绕 HTTP_PROXY
 
@@ -76,6 +79,8 @@ _DISCOVER_MIN_S = 600                             # 简称重查限频：简称�
 _DISCOVER_MAX_HOP = 6                             # nextOrgCode 提示最多走 6 跳（防环）
 
 _map_nodes = {}                                   # qr -> (mtime, [(x,y)...]) 地图节点缓存（按 mtime 失效）
+_car_state = {}                                   # rid -> {pod, prev, pend}：见 note_car_frame（帧稳定判定）
+_skip_log = {}                                    # pod -> 上次「落点定不下来」告警时刻（限频，防刷屏）
 _seq = [0]
 
 
@@ -312,13 +317,60 @@ def _mm(v):
         return None
 
 
+def _why_none(qr, x_m, y_m):
+    """落点失败的可诊断原因（只在失败时调用，多扫一遍节点无所谓）。"""
+    cands = [(nx, ny, math.hypot(nx - x_m, ny - y_m)) for nx, ny in _berth_nodes(qr)]
+    if not cands:
+        return "%s 图没有候选节点（maps/%s.json 缺失或全是路径点）" % (qr, qr)
+    near = min(cands, key=lambda t: t[2])
+    other = min((d for nx, ny, d in cands
+                 if math.hypot(nx - near[0], ny - near[1]) > _PLACE_SAME_SPOT), default=1e9)
+    if near[2] > _PLACE_MAX_D:
+        return "最近候选 %.2fm > 认可半径 %.2fm" % (near[2], _PLACE_MAX_D)
+    return ("最近候选 %.2fm、下一个不同位置 %.2fm（只近 %.2fm < 决断余量 %.2fm，分不清是哪一格）"
+            % (near[2], other, other - near[2], _PLACE_MIN_MARGIN))
+
+
+def note_car_frame(rid, pod, x_mm, y_mm, map_code):
+    """每帧喂一台车的 podCode 与坐标，返回「稳定变化」事件 (prev_pod, new_pod, x_mm, y_mm, map_code)，否则 None。
+
+    两件事一起做（都是修 L00342 那种"老是报落点定不下来"的根因）：
+      1) 抖动过滤：podCode 变化须连续 _POD_STABLE_FRAMES 帧稳定才认——推送偶发瞬时置空
+         （空↔有）不再被当成一次"取货+放货"；
+      2) 落点锚点：事件里的坐标取「变化前一帧」（那时车还扛着货架、正停在放/取货位），
+         而不是变化那一帧——RCS 清 podCode 常常晚于物理放货，变化帧的车可能已经在路上，
+         用它定落点当然定不准（这也正是弃权告警反复出现的原因）。
+    纯状态机，可在测试里离线驱动。
+    """
+    st = _car_state.get(rid)
+    if st is None:                                       # 首帧只登记（此刻不知道它是否刚取放货）
+        _car_state[rid] = {"pod": pod, "prev": (x_mm, y_mm, map_code), "pend": None}
+        return None
+    ev = None
+    if pod != st["pod"]:
+        p = st["pend"]
+        if p and p["pod"] == pod:
+            p["n"] += 1
+            if p["n"] >= _POD_STABLE_FRAMES:              # 连续稳定 → 认这次变化
+                ev = (st["pod"], pod, p["x"], p["y"], p["map"])
+                st["pod"], st["pend"] = pod, None
+        else:                                            # 新变化：锚点=变化前一帧的坐标/图
+            px, py, pm = st["prev"]
+            st["pend"] = {"pod": pod, "n": 1, "x": px, "y": py, "map": pm}
+    else:
+        st["pend"] = None                                # 回到已确认值：抖动，丢弃待定
+    st["prev"] = (x_mm, y_mm, map_code)
+    return ev
+
+
 def apply_car_event(prev_pod, new_pod, x_mm, y_mm, map_code):
-    """推送里某车 podCode 变化 → 增量维护表并广播。返回表是否变化。
+    """推送里某车 podCode 变化 → 增量维护表并广播。返回表是否变化。事件由 note_car_frame 产出
+    （已做帧稳定过滤；坐标是「变化前一帧」＝车还扛着货架、停在放/取货位那一帧）。
 
     · new_pod 非空（取货）：把它从任何图的储位上摘掉——此刻它被车扛着，前端画在车身上；
-    · prev_pod 非空且 ≠ new_pod（放货）：先摘掉可能的残留记录，再按车当前坐标定落点——
+    · prev_pod 非空且 ≠ new_pod（放货）：先摘掉可能的残留记录，再按车坐标定落点——
       认可半径 _PLACE_MAX_D 内取最近节点，且该点必须比「下一个不同位置」近出 _PLACE_MIN_MARGIN
-      （储位间距实测中位 0.96m；差得不够多说明位置数据分不清是哪一格）；定不下来就不记，
+      （储位间距实测中位 0.96m；差得不多说明位置数据分不清是哪一格）；定不下来就不记，
       由人工「同步货架」给真值——宁可暂时空白，也不能把货架画到隔壁格去。
     """
     prev_pod, new_pod = (prev_pod or "").strip(), (new_pod or "").strip()
@@ -352,9 +404,14 @@ def apply_car_event(prev_pod, new_pod, x_mm, y_mm, map_code):
                              "pos": "%06d%s%06d" % (round(bx * 1000), map_code, round(by * 1000))})
                 changed = True
             else:
-                print("rcs_pods: %s 放货落点定不下来（%s 图上没候选节点，或位置数据分不清是哪一格），"
-                      "先不记——需要时点「同步货架」校准"
-                      % (prev_pod, map_code or "?"), file=sys.stderr, flush=True)
+                now = time.time()
+                if now - _skip_log.get(prev_pod, 0) >= _SKIP_LOG_MIN_S:   # 同一货架限频，别刷屏
+                    _skip_log[prev_pod] = now
+                    print("rcs_pods: %s 放货落点定不下来——%s；位置 (%.2f, %.2f) 取自变化前一帧；"
+                          "先不记，需要时点「同步货架」校准"
+                          % (prev_pod, _why_none(map_code, x_m, y_m) if (map_code and x_m is not None)
+                             else "缺少坐标或地图码", x_m or 0, y_m or 0),
+                          file=sys.stderr, flush=True)
     if changed:
         _save_store()
         cb = _on_updated

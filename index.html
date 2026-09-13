@@ -12,8 +12,10 @@
   #top{display:flex;align-items:center;gap:14px;height:46px;padding:0 14px;
     background:var(--panel);border-bottom:1px solid var(--border)}
   #top h1{font-size:15px;font-weight:600}
-  select,button{background:#21262d;color:var(--fg);border:1px solid var(--border);
-    border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer}
+  select,button,input{background:#21262d;color:var(--fg);border:1px solid var(--border);
+    border-radius:6px;padding:4px 10px;font:inherit}
+  button{cursor:pointer}
+  input::placeholder{color:#6e7681}
   #stat{margin-left:auto;display:flex;gap:14px;color:var(--dim)}
   #stat b{color:var(--fg)}
   .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:1px}
@@ -56,6 +58,8 @@
   <label>地图 <select id="mapSel"></select></label>
   <button id="sync">⟳ 同步地图</button>
   <button id="syncPods">⟳ 同步货架</button>
+  <input id="q" placeholder="搜货架 / 储位：L00342、004771BB051930" style="width:260px">
+  <button id="go">🔍 定位</button>
   <span style="color:var(--dim)">滚轮缩放 · 拖动平移 · 点车看详情</span>
   <div id="stat">
     <span><span class="dot" style="background:var(--green)"></span>运行 <b id="cRun">0</b></span>
@@ -113,6 +117,7 @@ const RESYNC_DIST=8;       // 积压弧长>此值(m)=渲染确实停过：就地
 let map=null, sel=null, agvs=new Map();
 let PODS={};                                   // 货架清单：mapCode -> [{code,x,y,pal,area,pos}]（/api/pods 定时刷新）
 let carriedPods=new Set();                     // 此刻被车扛着的货架号：储位上不再画（车身上已画）
+let hl=null;                                   // 搜索结果高亮：{x,y,label,until}（到时自动消失）
 let view={x:0,y:0,s:1}, drag=null;
 const cv=document.getElementById("cv"), ctx=cv.getContext("2d");
 const $=id=>document.getElementById(id);
@@ -279,7 +284,7 @@ function handleAlarm(m){                  // 活动告警四道闸门，过不�
 function sseConnect(){
   const es=new EventSource("/api/events");
   esT.es=es;
-  es.onmessage=e=>{esT.last=Date.now();try{handle(JSON.parse(e.data));$("msg").style.display="none";}catch(err){}};
+  es.onmessage=e=>{esT.last=Date.now();try{handle(JSON.parse(e.data));if(!msgOk)$("msg").style.display="none";}catch(err){}};
   es.onopen=()=>{esT.last=Date.now();$("src").textContent="推送";};
   es.onerror=()=>{$("src").textContent="断线";es.close();setTimeout(sseConnect,2000);};   // 只重连本机 server；RCS 断线由 server 重登重连
 }
@@ -302,6 +307,7 @@ function feedTick(){                        // 1s UI 节拍：存活标记+列�
   const now=Date.now();
   for(const a of agvs.values()) if(now-a._seen>8000) a.online=false;   // 8s 无推送=引擎会话断(server 正在重登重连)
   $("lastOk").textContent="更新于 "+new Date(now).toLocaleTimeString();
+  if(msgUntil&&now>msgUntil){$("msg").style.display="none";msgUntil=0;}   // 提示条到期自动消失
   renderList(); renderDetail();
 }
 setInterval(feedTick,1000);
@@ -513,6 +519,18 @@ function frame(t){
     }
     drawAgv(a,px,py,col);
   }
+  if(hl){                                       // 搜索结果：脉冲圈 + 标签，到时自动消失
+    if(Date.now()>hl.until)hl=null;
+    else{
+      const[hx,hy]=P(hl.x,hl.y),r=clamp(0.9*view.s,14,60),ph=(Date.now()%1200)/1200;
+      ctx.strokeStyle="#f85149";ctx.lineWidth=2.5;
+      ctx.beginPath();ctx.arc(hx,hy,r*(0.75+0.45*ph),0,7);ctx.stroke();
+      ctx.globalAlpha=1-0.55*ph;                // 内圈同步收放：密集储位里也能一眼找到
+      ctx.beginPath();ctx.arc(hx,hy,r*0.55,0,7);ctx.stroke();
+      ctx.globalAlpha=1;
+      badge(hl.label,hx,hy-r-10,"#5a1e02","#ff8c7a");
+    }
+  }
 }
 // 货架小图标（车上/储位上同款）：方块 + 深色前缘（棕端=前方）
 // L货架=白底灰框；P托盘=琥珀底白框+斜纹——白框隔开车身橙，图上又不扎眼
@@ -587,7 +605,13 @@ requestAnimationFrame(frame);
 
 // ---------- 配置 / 交互 ----------
 let curMap="";
-function showMsg(t){const m=$("msg");m.style.display="block";m.textContent=t;}   // 失败不再静默
+let msgOk=false, msgUntil=0;                       // 提示条状态：ok=绿色(搜索/成功)，否则红色报错
+function showMsg(t,ok){
+  const m=$("msg");msgOk=!!ok;msgUntil=Date.now()+(ok?8000:20000);
+  m.style.display="block";m.textContent=t;
+  m.style.background=ok?"#0d3b23":"#5a1e02";
+  m.style.color=ok?"#7ee2a8":"#ff8c7a";
+  m.style.borderColor=ok?"#3fb95055":"#f8514955";}
 async function loadCfg(){                          // 站点配置唯一来源=后端 /api/config（值在 config.py）
   try{const r=await fetch("api/config",{cache:"no-store"});
     if(r.ok){const j=await r.json();CFG=Object.assign(CFG,j);POLL_GUESS=CFG.pollGuessMs||POLL_GUESS;}}catch(e){}
@@ -621,6 +645,50 @@ $("syncPods").onclick=async()=>{
   }catch(e){b.textContent="⚠ 同步失败";}
   setTimeout(()=>{b.disabled=false;b.textContent="⟳ 同步货架";},4000);
 };
+// ---------- 搜索定位：储位号（地标）/ 货架号 ----------
+function parseCell(t){                             // 储位号 -> {qr,x,y}；7+2+7 与 6+2+6 两种写法都认
+  if(/^\d{7}[A-Z]{2}\d{7}$/.test(t))return{qr:t.slice(7,9),x:+t.slice(0,7)/1000,y:+t.slice(9,16)/1000};
+  if(/^\d{6}[A-Z]{2}\d{6}$/.test(t))return{qr:t.slice(6,8),x:+t.slice(0,6)/1000,y:+t.slice(8,14)/1000};
+  return null;
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function focusAt(x,y,label){                       // 居中 + 高亮（视角不设边界，直接平移）
+  const W=cv.width/dpr,H=cv.height/dpr,[px,py]=P(x,y);
+  view.x+=W/2-px;view.y+=H/2-py;
+  hl={x,y,label,until:Date.now()+12000};
+}
+async function doSearch(){
+  const t=$("q").value.trim().toUpperCase();
+  if(!t)return;
+  const cell=parseCell(t);
+  if(cell){                                        // ① 储位号：定位到该格（跨图自动切图）
+    if(!CFG.maps.includes(cell.qr))
+      return showMsg(`储位号里的图码「${cell.qr}」不在配置的地图里（${CFG.maps.join(" / ")}）`);
+    if(cell.qr!==curMap)await switchMap(cell.qr);
+    focusAt(cell.x,cell.y,`储位 ${t}`);
+    const p=(PODS[cell.qr]||[]).find(q=>Math.abs(q.x-cell.x)<0.01&&Math.abs(q.y-cell.y)<0.01);
+    return showMsg(p?`储位 ${t}：${p.pal?"托盘":"货架"} ${p.code}`:`储位 ${t}：当前空着`,true);
+  }
+  if(/^[LP]\d+$/i.test(t)){                        // ② 货架/托盘号
+    for(const qr of Object.keys(PODS)){
+      const p=(PODS[qr]||[]).find(q=>q.code===t);
+      if(p){ if(qr!==curMap)await switchMap(qr);
+        focusAt(p.x,p.y,`货架 ${t}`);
+        return showMsg(`货架 ${t}：在 ${qr} 图${p.pos?" 储位 "+p.pos:""}${p.area?" · 区域 "+p.area:""}`,true); }
+    }
+    for(const a of agvs.values())                  // 不在任何储位上 → 看是否正被车扛着
+      if((a.podCode||"")===t){
+        if(a.mapCode&&a.mapCode!==curMap){await switchMap(a.mapCode);await sleep(300);}
+        const b=agvs.get(a.robotCode)||a;          // 换图后等一帧，取当前图里的该车
+        sel=b.robotCode;renderList();renderDetail();focusAt(b.x,b.y,`货架 ${t}`);
+        return showMsg(`货架 ${t}：正被 #${b.robotCode} 搬运`,true);
+      }
+    return showMsg(`没找到货架 ${t}：可能已被搬走或号不对（也可用储位号搜，如 004771BB051930）`);
+  }
+  showMsg(`认不出「${t}」：请输入货架号（如 L00342）或储位号（如 004771BB051930）`);
+}
+$("go").onclick=doSearch;
+$("q").onkeydown=e=>{if(e.key==="Enter")doSearch();};
 // 启动顺序：配置 → 地图 → 事件流（避免地图清单写死、避免 loadMap 竞态白等一个周期）
 (async()=>{
   await loadCfg();

@@ -60,30 +60,25 @@ def sub_loop(ip, port):
     for body in rcs_push.iter_msgs(ip, port):
         try:                              # 单帧异常不许打死订阅线程（否则全站静默失联）
             for o in rcs_push.parse_frame(body):
-                pod_changed = False           # 告警等其它事件不走取放货判定（曾因未初始化把整帧丢掉）
+                ev = None                 # 本帧若发生「稳定的取/放货」= 待增量维护的货架事件
                 with _latest_lock:
                     if o["e"] == "status":
-                        rid = o["a"]["robotCode"]
-                        prev = _latest.get(rid)
-                        newpod = o["a"].get("podCode") or ""
-                        prevpod = (prev.get("podCode") or "") if prev else ""
-                        # 车取货/放货 = podCode 变化：表增量维护在锁外做（见下）
-                        pod_changed = prev is not None and prevpod != newpod
-                        _latest[rid] = dict(o["a"], timestamp=int(time.time()*1000))
+                        a = o["a"]
+                        # 帧稳定过滤 + 落点锚点（用变化前一帧的坐标）都在 rcs_pods 里，纯状态机可离线测
+                        ev = rcs_pods.note_car_frame(a["robotCode"], a.get("podCode") or "",
+                                                     a.get("posX"), a.get("posY"),
+                                                     a.get("mapCode") or "")
+                        _latest[a["robotCode"]] = dict(a, timestamp=int(time.time()*1000))
                     elif o["e"] == "path" and o["id"] in _latest:
                         _latest[o["id"]]["path"] = o["path"]
-                        pod_changed = False
                     elif o["e"] == "offline":
                         for rid in o["ids"]:
                             if rid in _latest: _latest[rid]["online"] = False
-                        pod_changed = False
-                if pod_changed:
+                if ev:
                     # 取/放货增量维护货架↔储位表：推送本身已带全部事实（谁扛着什么、车在哪），
-                    # 不重拉 REST；全量校准由 rcs_pods 的启动/周期/手动同步负责。
+                    # 不重拉 REST；全量校准由 rcs_pods 的启动/手动同步负责。
                     try:
-                        a = _latest[rid]
-                        rcs_pods.apply_car_event(prevpod, newpod, a.get("posX"),
-                                                 a.get("posY"), a.get("mapCode") or "")
+                        rcs_pods.apply_car_event(*ev)
                     except Exception as e:
                         print("货架表增量更新异常: %s" % e, file=sys.stderr, flush=True)
                 bcast(o)
