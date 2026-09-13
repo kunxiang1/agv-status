@@ -8,6 +8,7 @@
 import base64, gzip, hmac, json, os, queue, socket, sys, threading, time
 import urllib.request, urllib.parse
 import rcs_push
+import rcs_pods
 import config as C
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -40,6 +41,8 @@ ACCESS_HINT = ("<!DOCTYPE html><meta charset=utf-8><title>需要访问密钥</ti
 
 _sync_lock = threading.Lock()
 _sync_at = 0.0                           # 上次成功/失败发起同步的时刻（节流用）
+_pods_lock = threading.Lock()
+_pods_at = 0.0                           # 上次「同步货架」发起时刻（按钮节流用）
 
 _latest = {}                             # robotCode -> REST 形状行（ROBOT_PATH 合并 path；仅 /api/snapshot 调试用）
 _latest_lock = threading.Lock()
@@ -57,14 +60,32 @@ def sub_loop(ip, port):
     for body in rcs_push.iter_msgs(ip, port):
         try:                              # 单帧异常不许打死订阅线程（否则全站静默失联）
             for o in rcs_push.parse_frame(body):
+                pod_changed = False           # 告警等其它事件不走取放货判定（曾因未初始化把整帧丢掉）
                 with _latest_lock:
                     if o["e"] == "status":
-                        _latest[o["a"]["robotCode"]] = dict(o["a"], timestamp=int(time.time()*1000))
+                        rid = o["a"]["robotCode"]
+                        prev = _latest.get(rid)
+                        newpod = o["a"].get("podCode") or ""
+                        prevpod = (prev.get("podCode") or "") if prev else ""
+                        # 车取货/放货 = podCode 变化：表增量维护在锁外做（见下）
+                        pod_changed = prev is not None and prevpod != newpod
+                        _latest[rid] = dict(o["a"], timestamp=int(time.time()*1000))
                     elif o["e"] == "path" and o["id"] in _latest:
                         _latest[o["id"]]["path"] = o["path"]
+                        pod_changed = False
                     elif o["e"] == "offline":
                         for rid in o["ids"]:
                             if rid in _latest: _latest[rid]["online"] = False
+                        pod_changed = False
+                if pod_changed:
+                    # 取/放货增量维护货架↔储位表：推送本身已带全部事实（谁扛着什么、车在哪），
+                    # 不重拉 REST；全量校准由 rcs_pods 的启动/周期/手动同步负责。
+                    try:
+                        a = _latest[rid]
+                        rcs_pods.apply_car_event(prevpod, newpod, a.get("posX"),
+                                                 a.get("posY"), a.get("mapCode") or "")
+                    except Exception as e:
+                        print("货架表增量更新异常: %s" % e, file=sys.stderr, flush=True)
                 bcast(o)
         except Exception as e:
             print("sub_loop(%s:%s) 单帧解析异常(已跳过): %s" % (ip, port, e), file=sys.stderr, flush=True)
@@ -189,6 +210,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"code": "0", "data": data}, ensure_ascii=False).encode())
         if path == "/api/config":                        # 前端唯一配置来源（不含任何凭据）
             return self._send(200, json.dumps(C.client_config(), ensure_ascii=False).encode())
+        if path == "/api/pods":                          # 货架↔储位表（rcs_pods 缓存快照，启动校准+增量维护）
+            return self._send(200, json.dumps(rcs_pods.payload(), ensure_ascii=False).encode())
         if path == "/": path = "/index.html"
         fp = os.path.normpath(os.path.join(BASE, path.lstrip("/")))
         if (not fp.startswith(BASE + os.sep) or not os.path.isfile(fp)
@@ -199,9 +222,25 @@ class H(BaseHTTPRequestHandler):
             self._send(200, f.read(), ctype)
 
     def do_POST(self):
-        global _sync_at
+        global _sync_at, _pods_at
         self._setkey = False
         if self._gate(): return
+        if self.path == "/api/syncPods":               # 人工校准货架↔储位表（前端「同步货架」按钮）
+            wait = C.PODS_SYNC_MIN_INTERVAL_S - (time.time() - _pods_at)
+            if wait > 0:                               # 接口无登录、不锁账号，但也没必要连点打 RCS
+                return self._send(200, json.dumps(
+                    {"err": "同步过于频繁，%d 秒后再试" % int(wait + 0.999)},
+                    ensure_ascii=False).encode())
+            with _pods_lock:
+                try:
+                    rcs_pods.refresh()                 # 全量逐图校准（增量维护理论上不会错，这是人工兜底）
+                    errs = rcs_pods.payload()["err"] or {}
+                except Exception as e:
+                    errs = {"*": str(e)}
+            _pods_at = time.time()
+            return self._send(200, json.dumps(
+                {"err": ";".join("%s %s" % (k, v) for k, v in errs.items()) or None},
+                ensure_ascii=False).encode())
         if self.path == "/api/syncMaps":
             wait = C.SYNC_MIN_INTERVAL_S - (time.time() - _sync_at)
             if wait > 0:                                 # 节流：每次同步要登录 CMS 两次，连点会锁账号
@@ -214,6 +253,10 @@ class H(BaseHTTPRequestHandler):
                 except Exception as e:
                     r = {"ok": {}, "err": str(e)}
             _sync_at = time.time()
+            try:                                         # 顺手刷新货架清单（几帧 REST 请求，失败不影响同步结果）
+                rcs_pods.refresh()
+            except Exception as e:
+                print("syncMaps 后刷新货架失败: %s" % e, file=sys.stderr, flush=True)
             return self._send(200, json.dumps(r, ensure_ascii=False).encode())
         return self._send(404, b'{"error":"unknown"}')
 
@@ -267,6 +310,8 @@ def startup_banner():
     if C.ALLOW_IPS:
         L.append("  来源限制    %s" % ", ".join(C.ALLOW_IPS))
     L.append("  地图同步    两次间隔不小于 %ds；推送断了本进程自动重登重连" % C.SYNC_MIN_INTERVAL_S)
+    L.append("  货架↔储位  启动校准一次；取/放货按推送增量维护；「同步货架」按钮人工校准"
+             "（需本机在 RCS 允许配置IPs 内）")
     L.append("=" * 74)
     L.append("提示：其它主机无需访问 RCS 的 6990/8790，也无需被 RCS 登记白名单"
              "（白名单按发起登录的机器 IP 记录，只有本机需要能连 RCS）。")
@@ -277,5 +322,8 @@ if __name__ == "__main__":
     for ip, port in C.push_targets():
         t = threading.Thread(target=sub_loop, args=(ip, port), daemon=True, name="sub%d" % port)
         t.start()
+    threading.Thread(target=rcs_pods.pods_loop, daemon=True, name="pods").start()   # 启动校准一次即退出
+    # 货架表任何变化（校准 / 取放货增量）→ 立即广播给所有浏览器
+    rcs_pods.set_on_updated(lambda: bcast(dict(rcs_pods.payload(), e="pods")))
     startup_banner()
     Srv((C.WEB_BIND, PORT), H).serve_forever()

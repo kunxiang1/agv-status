@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# 运行时产物（本机生成，不进仓）
+pods_store.json
