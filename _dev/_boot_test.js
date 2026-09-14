@@ -122,6 +122,14 @@ catch(e){ ok(false,'脚本执行抛异常: '+e.message); process.exit(1); }
      '背景必须按图码分图存放（BB 缺 polys：'+(RETS?Object.keys(RETS).join('/'):'RETS 为空')+'）');
   ok(!RETS||Object.keys(RETS).every(k=>Array.isArray(RETS[k].labels)),
      '每张图的背景都必须带 labels 数组（渲染按 ret.labels 遍历，缺了会抛异常）');
+  ok(!RETS||Object.keys(RETS).every(k=>RETS[k].areas&&typeof RETS[k].areas==='object'),
+     '每张图的背景都必须带 areas 字典（悬停提示靠它把 areaCode 译成中文名；缺了会退化成显示原始码）');
+  // 背景/区域名是低频数据：启动只读本机静态文件，绝不允许触发任何服务端"联系 RCS"的端点。
+  // （syncMaps/syncPods 会登录 CMS，连点还会触发 30s 节流——启动绝不该碰。）
+  const rcsHits=fetched.filter(u=>/^api\/(syncMaps|syncPods)/.test(u));
+  ok(!rcsHits.length,'启动链不得调用会联系 RCS 的端点（实际 '+rcsHits.join(',')+'）');
+  ok(fetched.filter(u=>/^maps\/rets\.json/.test(u)).length===1,
+     '背景只在启动时读一次本机静态文件（实际 '+fetched.filter(u=>/^maps\/rets\.json/.test(u)).length+' 次）');
 
   // ---- 喂一条真实推送状态帧（取自现场快照样本），再跑两帧渲染 ----
   const snap=JSON.parse(fs.readFileSync(path.join(ROOT,'snap_tmp.json'),'utf8'));

@@ -125,9 +125,17 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 
 // ---------- 地图加载 ----------
 const MAPCACHE={};                                 // 已加载地图的内存缓存：来回切图 0 网络、0 解析
-let RETS=null;                                     // 背景区域（maps/rets.json：{qr:{polys,labels}}，同步地图时刷新）
+let RETS=null;                                     // 背景区域（maps/rets.json：{qr:{polys,labels,areas}}，同步地图时刷新）
 async function loadRets(){
-  try{const r=await fetch("maps/rets.json?_=1",{cache:"no-store"});if(r.ok)RETS=(await r.json()).maps||{};}catch(e){}
+  // 只读本机静态文件（不碰 RCS）：背景/区域名是低频数据，仅「⟳同步地图」时由服务端重拉。
+  // ?_=Date.now() 是真 cache-buster：缓存代理/浏览器对静态 json 可能缓存旧副本。
+  try{const r=await fetch("maps/rets.json?_="+Date.now(),{cache:"no-store"});if(r.ok)RETS=(await r.json()).maps||{};}catch(e){}
+}
+// 区域码→中文名（RETS[qr].areas，见 §3.6）。译不出就原样显示码；qr 缺省取当前图。
+// 搜货架与悬停提示共用同一口径，避免同一信息两处显示不一致。
+function areaName(code,qr){
+  if(!code)return "";
+  return ((RETS&&RETS[qr||map?.qr]&&RETS[qr||map?.qr].areas)||{})[code]||code;
 }
 async function loadMap(qr){
   let m=MAPCACHE[qr];
@@ -717,7 +725,8 @@ async function doSearch(){
       const p=(PODS[qr]||[]).find(q=>q.code===t);
       if(p){ if(qr!==curMap)await switchMap(qr);
         focusAt(p.x,p.y,`货架 ${t}`);
-        return showMsg(`货架 ${t}：在 ${qr} 图${p.pos?" 储位 "+p.pos:""}${p.area?" · 区域 "+p.area:""}`,true); }
+        const ar=areaName(p.area,qr);              // 与悬停提示同口径：码→中文名，译不出才显示码
+        return showMsg(`货架 ${t}：在 ${qr} 图${p.pos?" 储位 "+p.pos:""}${p.area?" · 区域 "+ar:""}`,true); }
     }
     for(const a of agvs.values())                  // 不在任何储位上 → 看是否正被车扛着
       if((a.podCode||"")===t){
@@ -763,7 +772,8 @@ cv.onmousemove=e=>{
   const ph=hitPod(e.offsetX,e.offsetY);          // 无车命中再看储位上的货架：悬停/点选显示货架号
   if(ph){tip.style.display="block";
     tip.style.left=(e.offsetX+14)+"px";tip.style.top=(e.offsetY+8)+"px";
-    tip.textContent=`${ph.pal?"托盘":"货架"} ${ph.code}\n区域 ${ph.area||"-"} · 储位 ${ph.pos||`${Math.round(ph.x*1000).toString().padStart(6,"0")}${map.qr}${Math.round(ph.y*1000).toString().padStart(6,"0")}`}`;
+    const ar=areaName(ph.area)||"-";
+    tip.textContent=`${ph.pal?"托盘":"货架"} ${ph.code}\n区域 ${ar}${ph.area&&ar!==ph.area?"("+ph.area+")":""} · 储位 ${ph.pos||`${Math.round(ph.x*1000).toString().padStart(6,"0")}${map.qr}${Math.round(ph.y*1000).toString().padStart(6,"0")}`}`;
     // pos 兜底合成=接口 positionCode 同规则（增量放货记录无 pos 时，实测与 RCS 真值逐位一致）
     cv.style.cursor="pointer";}
   else{tip.style.display="none";cv.style.cursor="";}

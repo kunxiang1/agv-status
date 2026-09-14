@@ -30,7 +30,7 @@ node   _dev/_live_test.js                  # 现场真实数据端到端，需 s
 ## 1. 为什么不用轮询
 
 项目最初用公开接口 `POST :8083/rcms-dps/rest/queryAgvStatus`（5 秒轮询）。
-抓包分析（`_dev/协议分析报告_monitor-rcs.md`、`_dev/RCS-2000_未公开接口补充.md`）证实：官方
+抓包分析（`_dev/RCS-2000_未公开接口补充.md`）证实：官方
 MonitorClient **根本不调用这个 REST 接口**，它走的是 6990/8790 端口的 ZMTP 推送通道；
 REST 的 5s 粒度是本项目动画"不如官方跟手"的唯一原因——两端返回的坐标数值逐帧比对完全相等。
 因此改为直连推送通道，精度与官方对齐（208ms），REST 通道已彻底移除
@@ -208,7 +208,7 @@ greeting 用 `_recv_exact()` 循环读满 10 字节——TCP 是字节流，单�
 `ROBOT_OFFLINE` 会持续把**所有**离线车号重报一遍（实测 4 个编号，每个约 5 次/秒）。这些车不在
 本图在册列表里，前端按车号查不到即忽略，不会造成失联标记误闪。
 
-### 3.6 地图背景区域（rcs_rets.py：官方客户端背景图的同源数据）
+### 3.6 地图背景区域与区域名字典（rcs_rets.py：官方客户端背景图的同源数据）
 
 官方客户端里"字符后/沉金前""待曝光区"那层灰白底图 + 区域名称，既不在拓扑 XML、也不在 6990 推送里。
 逆向 `MonitorClient.exe`（字符串 `MapBK/Background_`、日志 "saving map background..."）确认它是
@@ -227,10 +227,19 @@ POST /rcms/services/rest/clientService/getShareMapInfoByMapCode   {"mapCode":"BB
 - 登录 Cookie 即可、**无 IP 白名单**；实测 BB/EE/CC/DD = 4/10/6/4 个多边形 + 4/6/15/3 条标注。
 - 解析器**按属性字典取值、不依赖属性书写顺序**：官方若调换 `color_r/g/b/a`，固定顺序正则会静默
   匹配失败并退回默认灰（恰是同一个灰，坏了也看不出来）；缺属性/少点则跳过该条，绝不整层崩掉。
-- 只在「⟳同步地图」时拉（`server.py syncMaps` 顺手调 `rcs_rets.pull_all()`），产物 `maps/rets.json`；
-  前端 `loadRets()` 启动拉一次，画在所有层之下。
+- **只在「⟳同步地图」时从 RCS 拉**（`server.py` 的 syncMaps 顺手调 `rcs_rets.pull_all()`，与背景同一次请求）；
+  **服务启动时绝不调用本模块**（启动只做货架校准）——背景与区域名都是随布局改版才动的低频数据，
+  启动时读本机 `maps/rets.json` 就够了，不必每次开机再登一次 CMS。
+  前端 `loadRets()` 只 `fetch("maps/rets.json?_="+Date.now())`（本机静态文件，不碰 RCS），启动一次 + 同步地图后一次，画在所有层之下。
+  **防回归**：`_rets_test.py` 断言 `__main__` 段不得出现 `rcs_rets`/`pull_all`、全项目只有一处调用、
+  且必须在 syncMaps 回包前跑完（否则前端会读到旧产物）；`_boot_test.js` 断言启动链不得请求 `api/syncMaps|syncPods`。
   **落盘保护**：单图失败跳过该图、沿用旧值；部分成功＝成功图覆盖、未成功图保留旧值；
   **四图全部失败时直接返回旧产物、不写盘**——否则会把好背景整层抹成空，且要等下次同步才可能恢复。
+- **区域码→中文名**（A11 `getAreaAndSecByMapCode.action`，form POST，同一次同步顺手拉）：
+  货架表的 `areaCode`（如 `zhhsh`）在这里译成中文名（"阻焊火山灰"），悬停提示显示"区域 阻焊火山灰(zhhsh)"。
+  实测 EE/BB/CC/DD = 17/8/15/90 条，与货架表的 `areaCode` **口径一致、命中率 100%**（字典里多出的键＝当前没放货架的区域）。
+  **独立失败保护**：字典用 `None` 表示"没拉到"、`{}` 表示"官方确实没配"，两者语义不同——
+  字典单独失败时沿用旧字典，绝不把已译好的中文名抹空；旧产物缺 `areas` 键的条目一律补齐，避免退化显示原始码。
 - 字号=官方 `size`(px) × (当前缩放/开屏缩放)：开屏与官方等大，随地图等比放大缩小（用户验收口径），限幅 4~64px。
 - `getSlamMapContentByCode` 现场回空（未配 SLAM 底图）；真正的车间平面栅格图若有天出现，走这个接口补。
 
@@ -355,8 +364,7 @@ status.js          机器人状态值字典（168 条）
 alarm.js           机器人告警码字典（17 MainType / 643 SubType）
 maps/              EE/BB/CC/DD 四图 JSON：节点 576/389/661/1065，边 602/428/677/1072；rets.json 背景区域
 snap_tmp.json      现场推送快照样本（_dev/_boot_test.js 拿它当真实帧喂给页面脚本）
-_dev/              开发期脚本、取证文档与审核报告，见 §5.1
-*.bak-0912         本轮改动前的原件备份（回滚直接覆盖回去）
+_dev/              开发期脚本与取证文档，见 §5.1
 ```
 
 | 文件 | 职责 |
@@ -365,7 +373,7 @@ _dev/              开发期脚本、取证文档与审核报告，见 §5.1
 | `server.py` | 订阅线程 + SSE 广播 + 配置下发 + 手动地图同步（带节流）+ 静态服务（后缀白名单）+ 访问门禁 + 快照端点 |
 | `rcs_push.py` | 登录（失败长退避防锁号）/ZMTP 握手/扫帧/解析；CLI：`python rcs_push.py CC` 输出 JSONL |
 | `rcs_pods.py` | 货架↔储位表：REST `queryPodBerthAndMat` 启动全量校准 → 译码（mapDataCode→坐标）→ 车取/放货按推送增量维护 → `pods_store.json` 落盘 |
-| `rcs_rets.py` | 地图背景区域：REST `getShareMapInfoByMapCode`（「同步地图」时拉）→ 多边形+文字标注解析 → `maps/rets.json` 落盘（详见 §3.6） |
+| `rcs_rets.py` | 地图背景与区域字典：REST `getShareMapInfoByMapCode`（多边形+文字标注）+ A11 `getAreaAndSecByMapCode.action`（区域码→中文名），均在「同步地图」时拉 → `maps/rets.json` 落盘（详见 §3.6） |
 | `index.html` | 配置拉取 + 事件处理 + 弧长动画引擎（含挂起收敛）+ 渲染（含货架层/悬停/搜索高亮）+ 交互（缩放/拖拽/点选/搜索定位） |
 | `parse_map.py` | 地图拓扑 XML → `maps/<图名>.json`；CLI 读 `config.MAP_XML_DIR` 下的 `地图-*.xml` |
 | `status.js` / `alarm.js` | 状态值与告警码中文字典（出自海康告警信息表 xlsx） |
@@ -384,12 +392,12 @@ _dev/              开发期脚本、取证文档与审核报告，见 §5.1
 | `node _dev/_alarm_test.js` | 告警四道闸门去留断言 |
 | `python _dev/_stdout_test.py` | 非阻塞日志：控制台被「快速编辑」冻住时 print 不许拖住业务线程（队列满丢弃、解冻续写） |
 | `python _dev/_fanout_test.py` | 按图分组订阅：事件归属哪张图（`rcs_push.event_map`）、该投给哪些分组（`server.route_keys`）、货架表事件必须发全部、开关回退有效 |
-| `python _dev/_rets_test.py` | 地图背景：XML 解析（毫米换算/点数门槛/颜色属性乱序/`&amp;` 反转义/竖排逐行/缺属性跳过）+ **落盘保护**（四图全失败不得写空、部分成功须保留旧图）+ 现有产物形状校验。加 `--live` 则重拉现场并与现有产物比对 |
+| `python _dev/_rets_test.py` | 地图背景与区域字典：XML 解析（毫米换算/点数门槛/颜色属性乱序/`&amp;` 反转义/竖排逐行/缺属性跳过）+ 区域字典解析（缺键/空码/空 rows）+ **落盘保护**（四图全失败不得写空、部分成功须保留旧图、字典单独失败须保留旧中文名、缺 `areas` 键须补齐）+ 现有产物形状校验。加 `--live` 则重拉现场并与现有产物比对 |
 | `node _dev/_live_test.js` | 现场真实数据端到端（需 server 在跑）：贴路/无瞬移/单调追帧 + **订阅 BB 不得收到它图事件** |
 | `python _dev/_load_test.py [N] [秒] [地址] [mix\|all\|图码]` | SSE 并发压测（需 server 在跑）：吞吐/事件间隔/连接成败，用于容量核算与分组前后对比（见 §7） |
 | `python _dev/gate_check.py [地图] [端口]` | 从运行中的 SSE 采样告警，按四道闸门模拟去留（需 server 在跑，默认取 `config.DEFAULT_MAP` / `WEB_PORT`） |
 | `python _dev/_verify.py` | RCS 未公开接口取证（**会真的连 CMS**，仅排障时跑） |
-| `_dev/*.md` / `_dev/*.html` | 未公开接口补充文档、动画引擎审核报告、本轮全面审核报告（协议分析报告在 `_dev/`） |
+| `_dev/RCS-2000_未公开接口补充.md` | 抓包逆向得到的 RCS 私有通道与未公开接口说明（§1/§3 的结论依据） |
 
 动画相关测试一律**从 `index.html` 实时抽取函数**再 eval，常量也从源码读出，禁止另抄一份
 ——改实现即改测试，杜绝测试与实现脱钩。
@@ -408,9 +416,11 @@ UI 只有 ⟳同步地图 一个按钮（"暂停查询"在推送架构下无意�
 3. 8790 每次重连回放全部活动告警：guid 去重已处理，量大时首屏略重。
 4. 任务通道（AMQP 5672 `exchangeMsg`、6989 DEALER）未接入——当前页面不需要任务回执。
 5. **官方"区域信息"面板未复刻**：官方那个列表面板（区域→储位→货架明细）没有对应接口，
-   只在客户端内部拼装。**但底图那层区域图形/名称已复刻**（§3.6，走 8181 `getShareMapInfoByMapCode`，
-   无 IP 白名单）；早先"经 8182 hikRpcService 拿不到、决定不显示"的结论已作废——
+   只在客户端内部拼装。**但底图那层区域图形/名称、以及区域码→中文名字典已复刻**
+   （§3.6，走 8181 `getShareMapInfoByMapCode` + `getAreaAndSecByMapCode.action`，均无 IP 白名单）；
+   早先"经 8182 hikRpcService 拿不到、决定不显示"的结论已作废——
    8182 是面板相关的另一条通道，与底图数据无关。
+   （若将来要"每库区含哪些地标码"的完整成员清单，A12 `mapData/findListWithPages.action` 可分页拉全表。）
 6. **视觉验证待人工**：本项目未配置浏览器自动化（需额外下载约 500MB Chromium），
    逻辑正确性由 §5.1 的离线用例 + 真实数据端到端覆盖，页面观感请在本地重编后截图复核。
 7. 静态资源未做 gzip/合并：四图 JSON 合计约 100KB，局域网首屏无感；若将来走广域网再说。

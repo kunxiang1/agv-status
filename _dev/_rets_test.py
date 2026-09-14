@@ -133,6 +133,76 @@ try:
     ok(after.get("BB", {}).get("polys"), "部分成功时未成功图的旧背景必须保留（实际 %r）" % (sorted(after),))
     ok(after.get("CC", {}).get("polys") and after["CC"]["polys"][0]["color"] == "#010203",
        "成功图必须被新数据覆盖")
+
+    # ---- 3b) 区域字典（A11 getAreaAndSecByMapCode）的独立失败保护 ----
+    print("[3b] 区域字典的独立失败保护")
+    orig_areas = R.pull_areas
+    try:
+        # 背景 XML 成功、但区域字典单独失败：已拉好的中文名字典绝不能被抹空
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"ts": 1.0, "maps": {
+                "BB": {"polys": [{"pts": [[0, 0], [1, 0], [0, 1]], "color": "#000000"}],
+                       "labels": [], "areas": {"zfh": "阻焊火山灰"}},
+                "CC": {"polys": [{"pts": [[0, 0], [1, 0], [0, 1]], "color": "#000000"}],
+                       "labels": [], "areas": {"aa": "外光暂存区"}}}}, f)
+
+        class OkOp:
+            def open(self, req, *a, **k):
+                class Resp:
+                    def read(self):
+                        return json.dumps({"shareInfos": [{"type": "1", "content": poly(
+                            [(0, 0), (1000, 0), (0, 1000)])}]}).encode()
+                return Resp()
+
+        R._login_opener = lambda *a, **k: OkOp()
+        R.pull_areas = lambda op, mc, timeout=12: (_ for _ in ()).throw(RuntimeError("A11 挂了"))
+        try:
+            R.pull_all()
+        finally:
+            R._login_opener, R.pull_areas = orig_login, orig_areas
+        after = json.load(open(path, encoding="utf-8"))["maps"]
+        ok(after["BB"].get("areas") == {"zfh": "阻焊火山灰"},
+           "区域字典单独失败时已有的中文名必须保留（实际 %r）" % (after["BB"].get("areas"),))
+        ok(after["CC"].get("areas") == {"aa": "外光暂存区"}, "同上次")
+
+        # 旧产物条目缺 areas 键（上一版升级而来）+ 部分图失败：必须补齐键，
+        # 否则前端 RETS[qr].areas 为 undefined，悬停提示退化成显示原始码
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"ts": 1.0, "maps": {
+                "BB": {"polys": [{"pts": [[0, 0], [1, 0], [0, 1]], "color": "#000000"}], "labels": []},
+                "CC": {"polys": [{"pts": [[0, 0], [1, 0], [0, 1]], "color": "#000000"}], "labels": []}}}, f)
+        R._login_opener = lambda *a, **k: HalfOp()
+        R.pull_areas = lambda op, mc, timeout=12: {"zz": "测试区"}
+        try:
+            R.pull_all()
+        finally:
+            R._login_opener, R.pull_areas = orig_login, orig_areas
+        after = json.load(open(path, encoding="utf-8"))["maps"]
+        missing = [k for k, v in after.items() if "areas" not in v]
+        ok(not missing, "所有图都必须带 areas 键（缺 %r 会让悬停退化成原始码）" % (missing,))
+        ok(all(isinstance(v.get("areas"), dict) for v in after.values()), "areas 必须是字典")
+    finally:
+        R.pull_areas = orig_areas
+
+    # ---- 3c) pull_areas 解析健壮性 ----
+    print("[3c] 区域字典解析")
+    class RowsOp:
+        def __init__(self, rows): self.rows = rows
+        def open(self, req, *a, **k):
+            rows = self.rows
+            class Resp:
+                def read(self):
+                    return json.dumps({"rows": rows}).encode()
+            return Resp()
+
+    ok(R.pull_areas(RowsOp([{"areaCode": "zhhsh", "areaName": "阻焊火山灰"},
+                            {"areaCode": "aa", "areaName": "aa"}]), "CC") ==
+       {"zhhsh": "阻焊火山灰", "aa": "aa"}, "正常行应译成 码→名")
+    ok(R.pull_areas(RowsOp([{"areaCode": "x"}]), "CC") == {"x": "x"}, "缺 areaName 应退回显示码本身")
+    ok(R.pull_areas(RowsOp([{"areaName": "无名"}]), "CC") == {}, "缺 areaCode 的行应跳过而不是抛异常")
+    ok(R.pull_areas(RowsOp([{"areaCode": ""}]), "CC") == {}, "空 areaCode 不应成为字典键")
+    ok(R.pull_areas(RowsOp([]), "CC") == {}, "空 rows 应返回空字典")
+    ok(R.pull_areas(RowsOp(None), "CC") == {}, "rows 为 null 应返回空字典")
 finally:
     if bak is not None:
         with open(path, "wb") as f:
@@ -157,9 +227,43 @@ if bak:
         for L in v.get("labels") or []:
             if "x" not in L or "y" not in L:
                 bad.append("%s:标注缺坐标" % qr)
+        if "areas" not in v:
+            bad.append("%s:缺 areas 键（悬停会退化成原始码）" % qr)
+        elif not isinstance(v["areas"], dict):
+            bad.append("%s:areas 不是字典" % qr)
     ok(not bad, "现有产物结构必须合法（%s）" % ("; ".join(bad[:3]) or "OK"))
 else:
     print("  SKIP 无 maps/rets.json（未同步过地图）")
+
+# ---- 4b) 防回归：绝不在服务启动时拉（低频数据，只该由「同步地图」触发）----
+print("[4b] 启动链不得联系 RCS（低频数据只在同步地图时拉）")
+try:
+    srv = open(os.path.join(ROOT, "server.py"), encoding="utf-8").read()
+    main_part = srv.split('if __name__ == "__main__":')[-1]
+    ok("rcs_rets" not in main_part,
+       "启动段（__main__）不得出现 rcs_rets：背景/区域名只在 syncMaps 里拉，"
+       "否则每次开机都白登一次 CMS")
+    ok("pull_all" not in main_part, "启动段不得调用 pull_all")
+    # 唯一允许的调用点就是 syncMaps 分支里那一处
+    ok(srv.count("rcs_rets.pull_all()") == 1,
+       "pull_all 全项目只能有一处调用（在 /api/syncMaps 内），实际 %d 处"
+       % srv.count("rcs_rets.pull_all()"))
+    ok("rcs_rets.pull_all()" in srv, "syncMaps 里必须保留 pull_all（同步地图要顺手刷新）")
+    idx_sync = srv.find("rcs_rets.pull_all()")
+    idx_send = srv.find("return self._send(200, json.dumps(r", idx_sync)
+    ok(idx_sync > 0 and 0 < idx_send and idx_sync < idx_send,
+       "pull_all 必须在 syncMaps 回包之前同步跑完（否则前端 loadRets 会读到旧产物）")
+except Exception as e:
+    ok(False, "启动链检查读 server.py 失败：%r" % (e,))
+
+# 前端：启动只读本机静态文件，不得在启动路径请求会联系 RCS 的端点
+try:
+    idx = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
+    ok('"maps/rets.json?_="+Date.now()' in idx or "maps/rets.json?_=" in idx,
+       "loadRets 的 cache-buster 必须是真时间戳（固定 ?_=1 是死参数）")
+    ok(idx.count("loadRets()") >= 2, "loadRets 应有启动与同步地图后两处调用")
+except Exception as e:
+    ok(False, "前端检查读 index.html 失败：%r" % (e,))
 
 # ---- 5) 可选：真实数据对账 ----
 if "--live" in sys.argv:
