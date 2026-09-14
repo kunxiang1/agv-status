@@ -124,6 +124,28 @@ catch(e){ ok(false,'脚本执行抛异常: '+e.message); process.exit(1); }
      '每张图的背景都必须带 labels 数组（渲染按 ret.labels 遍历，缺了会抛异常）');
   ok(!RETS||Object.keys(RETS).every(k=>RETS[k].areas&&typeof RETS[k].areas==='object'),
      '每张图的背景都必须带 areas 字典（悬停提示靠它把 areaCode 译成中文名；缺了会退化成显示原始码）');
+  ok(!RETS||Object.keys(RETS).every(k=>RETS[k].slotAreas&&typeof RETS[k].slotAreas==='object'),
+     '每张图的背景都必须带 slotAreas 字典（空储位悬停靠它显示区域；缺了空储位就只剩地标号）');
+  // 空储位悬停：用真实地图节点 + 真实 slotAreas 验证 cellCode/slotAreaName/hitSlot 三条链路。
+  // 取一个「确实没货架、但 slotAreas 里有区域」的地图节点——这正是用户要的场景。
+  const M=JSON.parse(fs.readFileSync(path.join(ROOT,'maps','BB.json'),'utf8'));
+  const occupied=new Set((PODS_PAYLOAD.pods.BB||[]).map(p=>Math.round(p.x*1000)+'BB'+Math.round(p.y*1000)));
+  const sa=RETS&&RETS.BB&&RETS.BB.slotAreas||{};
+  const n6=v=>Math.round(v*1000).toString().padStart(6,'0');   // 米→6位毫米（地标码的一节）
+  const cand=M.nodes.find(n=>(n[3]===0||n[3]===1)&&sa[Math.round(n[1]*1000).toString().padStart(6,'0')+'BB'+
+        Math.round(n[2]*1000).toString().padStart(6,'0')]&&!occupied.has(
+        Math.round(n[1]*1000)+'BB'+Math.round(n[2]*1000)));
+  if(cand){
+    const cc=vm.runInContext('cellCode',ctx)(cand[1],cand[2]);
+    ok(/^\d{6}BB\d{6}$/.test(cc),'cellCode 必须产出 6位x毫米+图码+6位y毫米（实际 '+cc+'）');
+    const nm=vm.runInContext('slotAreaName',ctx)(cand[1],cand[2]);
+    ok(nm===sa[cc],'slotAreaName 必须按 cellCode 命中 slotAreas（'+cc+' → '+nm+'）');
+    ok(!!nm,'空储位样本必须能译出区域名（实际 '+JSON.stringify(nm)+'）');
+  }else{
+    // 现场一定有大量空储位（实测 BB/CC/DD/EE 共 147 个空储位），找不到样本＝slotAreas 或地图/固件对不上，
+    // 那是真回归不是可忽略的跳过——必须显式失败，否则这条断言会静默失效（下轮坏了也不知道）。
+    ok(false,'必须能找到「空且有区域」的储位样本（实际没找到：slotAreas 为空或与地图坐标不匹配？）');
+  }
   // 背景/区域名是低频数据：启动只读本机静态文件，绝不允许触发任何服务端"联系 RCS"的端点。
   // （syncMaps/syncPods 会登录 CMS，连点还会触发 30s 节流——启动绝不该碰。）
   const rcsHits=fetched.filter(u=>/^api\/(syncMaps|syncPods)/.test(u));
@@ -165,6 +187,44 @@ catch(e){ ok(false,'脚本执行抛异常: '+e.message); process.exit(1); }
   ok((el('legend')._h||'').includes('货架 2'),'pods 事件后图例计数应更新为 2（实际 '+(el('legend')._h||'').slice(-60)+'）');
   try{ let n2=0; while(rafQueue.length&&n2<2){const cb=rafQueue.shift();cb(100000+n2*16);n2++;} }
   catch(e){ ok(false,'pods 更新后渲染不得抛异常：'+(e&&e.stack||'')); }
+
+  // ---- 空储位悬停：鼠标移到「没货架但 slotAreas 有区域」的储位上 → 提示条须显示地标+区域、货架留"无" ----
+  // 这是用户本轮要的功能：区域/地标与货架绑定无关，空储位也要能悬停看到区域，只是货架号留空。
+  if(cand){
+    const P=vm.runInContext('P',ctx);                       // 世界坐标→屏幕像素（与渲染同一变换）
+    const [sx,sy]=P(cand[1],cand[2]);
+    const ph=vm.runInContext('hitPod',ctx)(sx,sy);          // 该点必须没有货架（否则测的就不是空储位）
+    ok(!ph,'样本点必须没货架（hitPod 应返回 null，实际 '+(ph&&ph.code)+'）');
+    let herr=null;
+    try{ el('cv').onmousemove({offsetX:sx,offsetY:sy}); }catch(e){ herr=e; }
+    ok(!herr,'空储位悬停不得抛异常：'+(herr&&herr.stack||''));
+    const tip=el('tip').textContent||'';
+    const expectCode=vm.runInContext('cellCode',ctx)(cand[1],cand[2]);
+    ok((el('tip').style.display==='block'),'空储位悬停应显示提示条（实际 display='+el('tip').style.display+'）');
+    ok(tip.includes('储位')&&tip.includes(expectCode),'提示条应含「储位 '+expectCode+'」（实际「'+tip+'」）');
+    ok(tip.includes(sa[expectCode]),'提示条应含区域「'+sa[expectCode]+'」（实际「'+tip+'」）');
+    ok(tip.includes('货架 无'),'空储位的货架号应留空显示「无」（实际「'+tip+'」）');
+    // 移到远处应隐藏，避免提示条粘住
+    el('cv').onmousemove({offsetX:-999,offsetY:-999});
+    ok(el('tip').style.display==='none','移出储位后提示条应隐藏');
+  }
+  // 有货架的储位悬停：区域必须与空储位同口径（A12 优先），否则同一格有/无货架时区域名会变脸。
+  {
+    // 读运行中的 PODS（前面的 pods SSE 事件已把货架表换成带 pos 的两条），
+    // 从中挑一个 A12 有区域的点，移到它上面验证提示条。
+    const livePods=vm.runInContext('PODS',ctx).BB||[];
+    const pods=livePods.filter(p=>sa[n6(p.x)+'BB'+n6(p.y)]);
+    if(pods.length){
+      const P2=vm.runInContext('P',ctx),[sx,sy]=P2(pods[0].x,pods[0].y);
+      el('cv').onmousemove({offsetX:sx,offsetY:sy});
+      const t=el('tip').textContent||'';
+      ok(t.includes('货架')&&t.includes(pods[0].code),'有货架悬停应显示货架号（实际「'+t+'」）');
+      ok(t.includes(sa[n6(pods[0].x)+'BB'+n6(pods[0].y)]),
+         '有货架储位的区域须与空储位同口径（A12 优先）（实际「'+t+'」）');
+    }else{
+      console.log('  NOTE 无「有货架且 A12 有区域」的 BB 样本，跳过同口径断言');
+    }
+  }
 
   // ---- 搜索：储位号 / 货架号（跨图定位、车载中、认不出时的提示）----
   const msgTxt=()=>el('msg').textContent||'';

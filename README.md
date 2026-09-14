@@ -30,7 +30,7 @@ node   _dev/_live_test.js                  # 现场真实数据端到端，需 s
 ## 1. 为什么不用轮询
 
 项目最初用公开接口 `POST :8083/rcms-dps/rest/queryAgvStatus`（5 秒轮询）。
-抓包分析（`_dev/RCS-2000_未公开接口补充.md`）证实：官方
+抓包分析（`_dev/协议分析报告_monitor-rcs.md`、`_dev/RCS-2000_未公开接口补充.md`）证实：官方
 MonitorClient **根本不调用这个 REST 接口**，它走的是 6990/8790 端口的 ZMTP 推送通道；
 REST 的 5s 粒度是本项目动画"不如官方跟手"的唯一原因——两端返回的坐标数值逐帧比对完全相等。
 因此改为直连推送通道，精度与官方对齐（208ms），REST 通道已彻底移除
@@ -57,7 +57,7 @@ server.py (本机，唯一后端)
  ├─ GET  /api/config   站点配置下发（地图清单/默认图/推送节奏猜测，不含凭据）
  ├─ GET  /api/snapshot 当前车辆快照（调试/测试用，不产生对 RCS 的任何请求）
  ├─ GET  /api/pods     货架↔储位表快照（podCode+储位坐标+区域；不含凭据）
- ├─ POST /api/syncMaps 手动拉取 4 张地图 → maps/*.json（有 30s 节流；顺手全量校准货架表 + 背景区域 rcs_rets.py → maps/rets.json）
+ ├─ POST /api/syncMaps 手动拉取 4 张地图 → maps/*.json（有 30s 节流；顺手全量校准货架表 + 背景区域/区域名 rcs_rets.py → maps/rets.json）
  ├─ POST /api/syncPods 人工校准货架↔储位表（「同步货架」按钮；10s 节流）
  └─ GET  /*            静态文件（仅放行 .html/.js/.json/.css/图片；源码/备份/文档一律 404）
 
@@ -240,6 +240,16 @@ POST /rcms/services/rest/clientService/getShareMapInfoByMapCode   {"mapCode":"BB
   实测 EE/BB/CC/DD = 17/8/15/90 条，与货架表的 `areaCode` **口径一致、命中率 100%**（字典里多出的键＝当前没放货架的区域）。
   **独立失败保护**：字典用 `None` 表示"没拉到"、`{}` 表示"官方确实没配"，两者语义不同——
   字典单独失败时沿用旧字典，绝不把已译好的中文名抹空；旧产物缺 `areas` 键的条目一律补齐，避免退化显示原始码。
+- **地标码→区域名**（A12 `mapData/findListWithPages.action`，form POST、`start`/`limit` 分页，同一次同步顺手拉）：
+  =「地图数据」整张表，**一行一个地标**（含空储位），行带 `dataName`(地标码)、`areaCode`(区域名)、`stgSecCode`(库区)、
+  `dataTyp`(类型)、`cooX/cooY`(毫米)——**与货架在不在无关**，这是「空储位悬停也能显示区域」的唯一数据源。
+  只保留**储位类（`dataTyp∈{0,1}`）且区域非空**的行（工作区/路径点/充电区不标区域），落 `rets.json` 的
+  `slotAreas`（键=地标码 6位x+图码+6位y，值=区域名；此处 `areaCode` 本身即中文名，无需再过字典）。
+  实测储位的区域覆盖 EE/BB/CC/DD = 98%/77%/100%/74%（DD 低是因它用 `z0`/`z3` 这类单字符分区名）。
+  探针结论：`queryPodBerthAndMat`（A5 货架表）**只返回当前有货架的储位**，空储位一行都不给、
+  按 `positionCode`/`areaCode` 过滤还直接报错 → 空储位的区域只能靠 A12，别想从货架表拿。
+  与 A11 同样有**独立失败保护**（`slotAreas` 单独失败沿用旧值，键一律补齐），
+  且地标码坐标与地图节点、与 `queryPodBerthAndMat` 的 `positionCode` **逐位一致**（实测 57/57 零偏差）。
 - 字号=官方 `size`(px) × (当前缩放/开屏缩放)：开屏与官方等大，随地图等比放大缩小（用户验收口径），限幅 4~64px。
 - `getSlamMapContentByCode` 现场回空（未配 SLAM 底图）；真正的车间平面栅格图若有天出现，走这个接口补。
 
@@ -282,7 +292,12 @@ POST /rcms/services/rest/clientService/getShareMapInfoByMapCode   {"mapCode":"BB
 - `reqCode` 是防重键：重复编号返回「请求编号已存在」，每次请求必须唯一。
 - 前端：储位上的货架画**与车身货架同款的小图标**（灰方块+深色前缘，约车长 40% 的观感）——
   货架"从储位到小车"同形同大小，直观；车刚扛起、表还没跟上的瞬间由前端 `carriedPods` 隐藏。
-  悬停显示「货架/托盘 / 区域 / 储位坐标」。
+  悬停显示「货架/托盘 号 / 区域 / 储位坐标」。
+- **空储位也能悬停**：区域与地标**绑定在地标本身**，与上面有没有货架无关——所以鼠标移到空储位上，
+  照样显示「储位 号 / 区域 名 / 货架 无」（货架号留空位＝"无"）。
+  命中用储位节点（类型 0/1，与货架落点候选同一口径），半径＝货架图标同尺寸；区域名取自 `rets.json` 的
+  `slotAreas`（A12，见 §3.6），地标号由坐标合成（`cellCode`，与接口 `positionCode` 逐位一致）。
+  空储位命中只在没有货架命中时才走（`hitPod` 先行），不会盖住有货架的格子。
 
 ## 4. 显示与动画算法（index.html）
 
@@ -362,9 +377,9 @@ index.html         前端全部（事件处理 + 动画引擎 + canvas 渲染）
 parse_map.py       地图拓扑 XML → maps/<图名>.json
 status.js          机器人状态值字典（168 条）
 alarm.js           机器人告警码字典（17 MainType / 643 SubType）
-maps/              EE/BB/CC/DD 四图 JSON：节点 576/389/661/1065，边 602/428/677/1072；rets.json 背景区域
+maps/              EE/BB/CC/DD 四图 JSON：节点 576/389/661/1065，边 602/428/677/1072；rets.json 背景区域+区域名+地标区域表
 snap_tmp.json      现场推送快照样本（_dev/_boot_test.js 拿它当真实帧喂给页面脚本）
-_dev/              开发期脚本与取证文档，见 §5.1
+_dev/              开发期脚本、取证文档与审核报告，见 §5.1
 ```
 
 | 文件 | 职责 |
@@ -373,7 +388,7 @@ _dev/              开发期脚本与取证文档，见 §5.1
 | `server.py` | 订阅线程 + SSE 广播 + 配置下发 + 手动地图同步（带节流）+ 静态服务（后缀白名单）+ 访问门禁 + 快照端点 |
 | `rcs_push.py` | 登录（失败长退避防锁号）/ZMTP 握手/扫帧/解析；CLI：`python rcs_push.py CC` 输出 JSONL |
 | `rcs_pods.py` | 货架↔储位表：REST `queryPodBerthAndMat` 启动全量校准 → 译码（mapDataCode→坐标）→ 车取/放货按推送增量维护 → `pods_store.json` 落盘 |
-| `rcs_rets.py` | 地图背景与区域字典：REST `getShareMapInfoByMapCode`（多边形+文字标注）+ A11 `getAreaAndSecByMapCode.action`（区域码→中文名），均在「同步地图」时拉 → `maps/rets.json` 落盘（详见 §3.6） |
+| `rcs_rets.py` | 地图背景与区域字典：REST `getShareMapInfoByMapCode`（多边形+文字标注）+ A11 `getAreaAndSecByMapCode.action`（区域码→中文名）+ A12 `mapData/findListWithPages.action`（地标码→区域名，空储位悬停用），均在「同步地图」时拉 → `maps/rets.json` 落盘（详见 §3.6） |
 | `index.html` | 配置拉取 + 事件处理 + 弧长动画引擎（含挂起收敛）+ 渲染（含货架层/悬停/搜索高亮）+ 交互（缩放/拖拽/点选/搜索定位） |
 | `parse_map.py` | 地图拓扑 XML → `maps/<图名>.json`；CLI 读 `config.MAP_XML_DIR` 下的 `地图-*.xml` |
 | `status.js` / `alarm.js` | 状态值与告警码中文字典（出自海康告警信息表 xlsx） |
@@ -392,12 +407,12 @@ _dev/              开发期脚本与取证文档，见 §5.1
 | `node _dev/_alarm_test.js` | 告警四道闸门去留断言 |
 | `python _dev/_stdout_test.py` | 非阻塞日志：控制台被「快速编辑」冻住时 print 不许拖住业务线程（队列满丢弃、解冻续写） |
 | `python _dev/_fanout_test.py` | 按图分组订阅：事件归属哪张图（`rcs_push.event_map`）、该投给哪些分组（`server.route_keys`）、货架表事件必须发全部、开关回退有效 |
-| `python _dev/_rets_test.py` | 地图背景与区域字典：XML 解析（毫米换算/点数门槛/颜色属性乱序/`&amp;` 反转义/竖排逐行/缺属性跳过）+ 区域字典解析（缺键/空码/空 rows）+ **落盘保护**（四图全失败不得写空、部分成功须保留旧图、字典单独失败须保留旧中文名、缺 `areas` 键须补齐）+ 现有产物形状校验。加 `--live` 则重拉现场并与现有产物比对 |
+| `python _dev/_rets_test.py` | 地图背景与区域字典：XML 解析（毫米换算/点数门槛/颜色属性乱序/`&amp;` 反转义/竖排逐行/缺属性跳过）+ 区域字典解析（缺键/空码/空 rows）+ **地标区域表解析（A12 分页/只留储位类且区域非空）** + **落盘保护**（四图全失败不得写空、部分成功须保留旧图、字典/地标区域表各自单独失败须保留旧值、缺 `areas`/`slotAreas` 键须补齐）+ 现有产物形状校验。加 `--live` 则重拉现场并与现有产物比对 |
 | `node _dev/_live_test.js` | 现场真实数据端到端（需 server 在跑）：贴路/无瞬移/单调追帧 + **订阅 BB 不得收到它图事件** |
 | `python _dev/_load_test.py [N] [秒] [地址] [mix\|all\|图码]` | SSE 并发压测（需 server 在跑）：吞吐/事件间隔/连接成败，用于容量核算与分组前后对比（见 §7） |
 | `python _dev/gate_check.py [地图] [端口]` | 从运行中的 SSE 采样告警，按四道闸门模拟去留（需 server 在跑，默认取 `config.DEFAULT_MAP` / `WEB_PORT`） |
 | `python _dev/_verify.py` | RCS 未公开接口取证（**会真的连 CMS**，仅排障时跑） |
-| `_dev/RCS-2000_未公开接口补充.md` | 抓包逆向得到的 RCS 私有通道与未公开接口说明（§1/§3 的结论依据） |
+| `_dev/*.md` / `_dev/*.html` | 未公开接口补充文档、动画引擎审核报告、本轮全面审核报告（协议分析报告在 `_dev/`） |
 
 动画相关测试一律**从 `index.html` 实时抽取函数**再 eval，常量也从源码读出，禁止另抄一份
 ——改实现即改测试，杜绝测试与实现脱钩。
@@ -415,12 +430,13 @@ UI 只有 ⟳同步地图 一个按钮（"暂停查询"在推送架构下无意�
 2. SN 序列号→车号映射接口未找到；若 CMS 设备档案页有，`/api/events` 加一个查表即可。
 3. 8790 每次重连回放全部活动告警：guid 去重已处理，量大时首屏略重。
 4. 任务通道（AMQP 5672 `exchangeMsg`、6989 DEALER）未接入——当前页面不需要任务回执。
-5. **官方"区域信息"面板未复刻**：官方那个列表面板（区域→储位→货架明细）没有对应接口，
-   只在客户端内部拼装。**但底图那层区域图形/名称、以及区域码→中文名字典已复刻**
-   （§3.6，走 8181 `getShareMapInfoByMapCode` + `getAreaAndSecByMapCode.action`，均无 IP 白名单）；
+5. **官方"区域信息"**：底图那层区域图形/名称、区域码→中文名字典（A11）、地标码→区域名成员表（A12）
+   均已复刻（§3.6，走 8181 `getShareMapInfoByMapCode` + `getAreaAndSecByMapCode.action` +
+   `mapData/findListWithPages.action`，均无 IP 白名单），**官方那个"区域→储位→货架明细"列表面板本身
+   未复刻**（本项目把它的数据用在了底图与悬停提示上，没做那套列表 UI）；
    早先"经 8182 hikRpcService 拿不到、决定不显示"的结论已作废——
    8182 是面板相关的另一条通道，与底图数据无关。
-   （若将来要"每库区含哪些地标码"的完整成员清单，A12 `mapData/findListWithPages.action` 可分页拉全表。）
+   （A12 现只取储位类地标的区域名；要做"每库区含哪些地标码/货架"的完整清单，同表分页拉全即可。）
 6. **视觉验证待人工**：本项目未配置浏览器自动化（需额外下载约 500MB Chromium），
    逻辑正确性由 §5.1 的离线用例 + 真实数据端到端覆盖，页面观感请在本地重编后截图复核。
 7. 静态资源未做 gzip/合并：四图 JSON 合计约 100KB，局域网首屏无感；若将来走广域网再说。

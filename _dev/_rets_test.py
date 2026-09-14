@@ -203,6 +203,67 @@ try:
     ok(R.pull_areas(RowsOp([{"areaCode": ""}]), "CC") == {}, "空 areaCode 不应成为字典键")
     ok(R.pull_areas(RowsOp([]), "CC") == {}, "空 rows 应返回空字典")
     ok(R.pull_areas(RowsOp(None), "CC") == {}, "rows 为 null 应返回空字典")
+
+    # ---- 3d) 地标码→区域名（A12 mapData/findListWithPages，空储位悬停的数据源）----
+    print("[3d] 地标区域表解析（A12，分页）")
+    class PagesOp:
+        """模拟分页：按 start/limit 返回对应切片，总计 total 行。"""
+        def __init__(self, rows): self.rows = rows
+        def open(self, req, *a, **k):
+            import urllib.parse as _up
+            body = req.data.decode() if getattr(req, "data", None) else ""
+            qs = dict(_up.parse_qsl(body))
+            start, limit = int(qs.get("start", 1)), int(qs.get("limit", 500))
+            data = self.rows[start - 1:start - 1 + limit]
+            total = len(self.rows)
+            class Resp:
+                def read(self):
+                    return json.dumps({"total": total, "data": data}).encode()
+            return Resp()
+
+    rows_a12 = [
+        {"dataName": "045132BB065293", "areaCode": "外形机台储位", "dataTyp": "1", "stgSecCode": "wxjt"},
+        {"dataName": "058518BB068475", "areaCode": "", "dataTyp": "16", "stgSecCode": ""},   # 路径点：跳过
+        {"dataName": "045132BB062396", "areaCode": "", "dataTyp": "1", "stgSecCode": ""},    # 储位但无区域：跳过
+        {"dataName": "045132BB061426", "areaCode": "字符暂存区", "dataTyp": "0", "stgSecCode": "zfh"},
+        {"dataName": "", "areaCode": "无名区", "dataTyp": "1", "stgSecCode": ""},             # 缺地标码：跳过
+    ]
+    sa = R.pull_slot_areas(PagesOp(rows_a12), "BB", page=2)   # page=2 逼它翻多页
+    ok(sa == {"045132BB065293": "外形机台储位", "045132BB061426": "字符暂存区"},
+       "只留「储位类(0/1) 且 区域非空」的行，键=地标码 值=区域名（实际 %r）" % (sa,))
+    ok(R.pull_slot_areas(PagesOp([]), "BB") == {}, "空表应返回空字典且不抛异常")
+
+    # ---- 3e) 地标区域表的独立失败保护（与 A11 字典同一口径）----
+    print("[3e] 地标区域表独立失败保护")
+    orig_sa = R.pull_slot_areas
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"ts": 1.0, "maps": {
+                "BB": {"polys": [{"pts": [[0, 0], [1, 0], [0, 1]], "color": "#000000"}], "labels": [],
+                       "areas": {"zfh": "阻焊火山灰"}, "slotAreas": {"045132BB065293": "外形机台储位"}}}}, f)
+
+        class OkOp2:
+            def open(self, req, *a, **k):
+                class Resp:
+                    def read(self):
+                        return json.dumps({"shareInfos": [{"type": "1", "content": poly(
+                            [(0, 0), (1000, 0), (0, 1000)])}]}).encode()
+                return Resp()
+
+        R._login_opener = lambda *a, **k: OkOp2()
+        R.pull_areas = lambda op, mc, timeout=12: {"zfh": "阻焊火山灰"}
+        R.pull_slot_areas = lambda op, mc, timeout=20, page=500: (_ for _ in ()).throw(RuntimeError("A12 挂了"))
+        try:
+            R.pull_all()
+        finally:
+            R._login_opener, R.pull_areas, R.pull_slot_areas = orig_login, orig_areas, orig_sa
+        after = json.load(open(path, encoding="utf-8"))["maps"]
+        ok(after["BB"].get("slotAreas") == {"045132BB065293": "外形机台储位"},
+           "地标区域表单独失败时，已有映射必须保留（否则空储位区域突然消失）（实际 %r）" % (after["BB"].get("slotAreas"),))
+        missing2 = [k for k, v in after.items() if "slotAreas" not in v]
+        ok(not missing2, "所有图都必须带 slotAreas 键（缺 %r 会让空储位取不到区域）" % (missing2,))
+    finally:
+        R.pull_slot_areas = orig_sa
 finally:
     if bak is not None:
         with open(path, "wb") as f:
@@ -231,6 +292,15 @@ if bak:
             bad.append("%s:缺 areas 键（悬停会退化成原始码）" % qr)
         elif not isinstance(v["areas"], dict):
             bad.append("%s:areas 不是字典" % qr)
+        if "slotAreas" not in v:
+            bad.append("%s:缺 slotAreas 键（空储位取不到区域）" % qr)
+        elif not isinstance(v["slotAreas"], dict):
+            bad.append("%s:slotAreas 不是字典" % qr)
+        else:
+            for k, nm in v["slotAreas"].items():       # 键=地标码（6位x毫米+图码+6位y毫米 = 14 字符），值=区域名
+                if len(k) != 14 or k[6:8] != qr or not nm:
+                    bad.append("%s:slotAreas 条目非法 %r→%r" % (qr, k, nm))
+                    break
     ok(not bad, "现有产物结构必须合法（%s）" % ("; ".join(bad[:3]) or "OK"))
 else:
     print("  SKIP 无 maps/rets.json（未同步过地图）")

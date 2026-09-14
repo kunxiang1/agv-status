@@ -125,7 +125,7 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 
 // ---------- 地图加载 ----------
 const MAPCACHE={};                                 // 已加载地图的内存缓存：来回切图 0 网络、0 解析
-let RETS=null;                                     // 背景区域（maps/rets.json：{qr:{polys,labels,areas}}，同步地图时刷新）
+let RETS=null;                                     // 背景区域（maps/rets.json：{qr:{polys,labels,areas,slotAreas}}，同步地图时刷新）
 async function loadRets(){
   // 只读本机静态文件（不碰 RCS）：背景/区域名是低频数据，仅「⟳同步地图」时由服务端重拉。
   // ?_=Date.now() 是真 cache-buster：缓存代理/浏览器对静态 json 可能缓存旧副本。
@@ -769,12 +769,22 @@ cv.onmousemove=e=>{
     tip.style.left=(e.offsetX+14)+"px";tip.style.top=(e.offsetY+8)+"px";
     tip.textContent=`#${a.robotCode} ${stInfo(a.status)[0]}\n电量 ${a.battery}%  速度 ${a.speed}mm/s\n货架 ${a.podCode||"无"}`;
     cv.style.cursor="pointer";return;}
-  const ph=hitPod(e.offsetX,e.offsetY);          // 无车命中再看储位上的货架：悬停/点选显示货架号
-  if(ph){tip.style.display="block";
+  const ph=hitPod(e.offsetX,e.offsetY);          // 先看有货架的储位（内容更全）
+  const sl=ph?null:hitSlot(e.offsetX,e.offsetY); // 空储位：区域/地标与货架一样绑定，只是没货架号
+  if(ph||sl){tip.style.display="block";
     tip.style.left=(e.offsetX+14)+"px";tip.style.top=(e.offsetY+8)+"px";
-    const ar=areaName(ph.area)||"-";
-    tip.textContent=`${ph.pal?"托盘":"货架"} ${ph.code}\n区域 ${ar}${ph.area&&ar!==ph.area?"("+ph.area+")":""} · 储位 ${ph.pos||`${Math.round(ph.x*1000).toString().padStart(6,"0")}${map.qr}${Math.round(ph.y*1000).toString().padStart(6,"0")}`}`;
-    // pos 兜底合成=接口 positionCode 同规则（增量放货记录无 pos 时，实测与 RCS 真值逐位一致）
+    if(ph){
+      // 区域优先用 A12（地标区域表，与空储位同一口径——同一格有/无货架时区域名必须一致）；
+      // A12 缺该地标才退回 A11（货架表 areaCode → 中文名），再缺就显示原始码。
+      const pos=ph.pos||cellCode(ph.x,ph.y), sa=slotAreaName(ph.x,ph.y);
+      const ar=sa||areaName(ph.area)||"-";
+      tip.textContent=`${ph.pal?"托盘":"货架"} ${ph.code}\n区域 ${ar}${!sa&&ph.area&&ar!==ph.area?"("+ph.area+")":""} · 储位 ${pos}`;
+      // pos 兜底合成=接口 positionCode 同规则（增量放货记录无 pos 时，实测与 RCS 真值逐位一致）
+    }else{
+      // 空储位：地标与区域在「地图数据」表里与货架无关，照常显示；只是没有货架号 → 留"无"
+      const ar=sl.area||"-";                        // A12（地图数据表）按地标码给的区域名，已是中文
+      tip.textContent=`储位 ${cellCode(sl.x,sl.y)}\n区域 ${ar} · 货架 无`;
+    }
     cv.style.cursor="pointer";}
   else{tip.style.display="none";cv.style.cursor="";}
 };
@@ -797,6 +807,25 @@ function hitPod(px,py){                            // 货架命中：屏幕 14px
     const[x,y]=P(p.x,p.y),d=Math.hypot(x-px,y-py);
     if(d<bd){bd=d;best=p;}}
   return best;
+}
+function n6(v){return Math.round(v*1000).toString().padStart(6,"0");}   // 米 → 6位毫米（储位号/地标码的一节）
+function cellCode(x,y,qr){                         // 坐标 → 地标/储位号（6位x毫米+图码+6位y毫米）
+  return n6(x)+(qr||map?.qr||"")+n6(y);            // ＝A12 的 dataName ＝接口 positionCode，逐位一致
+}
+function slotAreaName(x,y,qr){                     // 储位地标 → 区域名（RETS[qr].slotAreas，见 §3.6 A12）
+  const q=qr||map?.qr,qc=((RETS&&RETS[q]&&RETS[q].slotAreas)||{});
+  return qc[cellCode(x,y,q)]||"";
+}
+function hitSlot(px,py){                           // 空储位命中：只认储位节点（类型 0/1，与货架落点候选同一口径）
+  if(!map)return null;
+  const R=clamp(0.31*view.s,6,56);                 // 与货架图标同尺寸：空储位悬停范围＝图标视觉范围
+  let best=null,bd=R;
+  for(const n of map.nodes){
+    const tp=n[3];if(tp!==0&&tp!==1)continue;
+    const[x,y]=P(n[1],n[2]),d=Math.hypot(x-px,y-py);
+    if(d<bd){bd=d;best=n;}}
+  if(!best)return null;
+  return{x:best[1],y:best[2],area:slotAreaName(best[1],best[2])};
 }
 
 // ---------- 侧栏 ----------
