@@ -34,7 +34,7 @@ def parse_map(path, txt=None):
         if k not in seen and bb in nodes and a != bb:
             seen.add(k); ue.append([a, bb])
     return {'name': name.group(1) if name else '', 'qr': qr.group(1) if qr else '',
-            'nodes': [[k, v[0], v[1], v[2]] for k, v in sorted(nodes.items())],
+            'nodes': [[k] + list(v) for k, v in sorted(nodes.items())],
             'edges': ue}
 
 if __name__ == '__main__':

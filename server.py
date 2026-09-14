@@ -331,6 +331,11 @@ class H(BaseHTTPRequestHandler):
                 rcs_pods.refresh()
             except Exception as e:
                 print("syncMaps 后刷新货架失败: %s" % e, file=sys.stderr, flush=True)
+            try:                                         # 顺手刷新背景区域（getShareMapInfoByMapCode，失败无碍）
+                import rcs_rets
+                rcs_rets.pull_all()
+            except Exception as e:
+                print("syncMaps 后刷新背景失败: %s" % e, file=sys.stderr, flush=True)
             return self._send(200, json.dumps(r, ensure_ascii=False).encode())
         return self._send(404, b'{"error":"unknown"}')
 

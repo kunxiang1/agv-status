@@ -125,6 +125,10 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 
 // ---------- 地图加载 ----------
 const MAPCACHE={};                                 // 已加载地图的内存缓存：来回切图 0 网络、0 解析
+let RETS=null;                                     // 背景区域（maps/rets.json：{qr:{polys,labels}}，同步地图时刷新）
+async function loadRets(){
+  try{const r=await fetch("maps/rets.json?_=1",{cache:"no-store"});if(r.ok)RETS=(await r.json()).maps||{};}catch(e){}
+}
 async function loadMap(qr){
   let m=MAPCACHE[qr];
   if(!m){                                          // 只有首次载入某图才真正拉本机静态文件 maps/<qr>.json
@@ -172,9 +176,10 @@ function graphRoute(x0,y0,x1,y1){
 function fitView(){
   if(!cv.width)resize();
   const[bx0,by0,bx1,by1]=map.bbox, W=cv.width/dpr, H=cv.height/dpr, pad=40;
-  // cover:铺满画布(地图竖、视口横时不再缩成一小块),溢出部分拖动查看
+  // cover：铺满画布（地图竖、视口横时不再缩成一小块），溢出部分拖动查看
   const s=Math.max((W-2*pad)/Math.max(bx1-bx0,1),(H-2*pad)/Math.max(by1-by0,1));
   view={s,x:W/2-(bx0+bx1)/2*s,y:H/2+(by0+by1)/2*s};
+  map.s0=s;                                   // 开屏基准缩放：区域标注字号以此为 1×
 }
 // 视角不设边界锁：滚轮/拖拽可以自由把地图移出屏幕边界。
 // （曾加过"防丢图"限位，实测反而挡住看边角——想看清某个角落时必须能把地图拖过去，
@@ -477,6 +482,27 @@ function frame(t){
   }
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.fillStyle="#eef1f5";ctx.fillRect(0,0,cv.width/dpr,cv.height/dpr);
+  // 背景区域多边形+文字标注（官方底图同源：getShareMapInfoByMapCode，先画在所有层之下）
+  const ret=RETS&&RETS[map.qr];
+  if(ret){
+    for(const p of ret.polys){
+      ctx.fillStyle=p.color;ctx.beginPath();
+      const[x0,y0]=P(p.pts[0][0],p.pts[0][1]);ctx.moveTo(x0,y0);
+      for(const[x,y]of p.pts.slice(1)){const[qx,qy]=P(x,y);ctx.lineTo(qx,qy);}
+      ctx.closePath();ctx.fill();
+    }
+    for(const L of ret.labels){                     // 字号=官方 size(px)×(当前缩放/开屏缩放)：开屏与官方等大，随地图等比缩放，上下限防看不见/糊屏
+      const fs=clamp((L.size||12)*(view.s/(map.s0||view.s)),4,64);
+      const[tx,ty]=P(L.x,L.y);
+      if(tx<-200||ty<-200||tx>cv.width/dpr+200||ty>cv.height/dpr+200)continue;
+      ctx.font=`${fs}px '${L.font}',sans-serif`;ctx.fillStyle=L.color;ctx.textAlign="center";
+      const lines=L.text.split(/\s+/).filter(Boolean);
+      if(lines.length>1)                             // 竖排：官方在窄框里逐字换行（\n 分隔）
+        lines.forEach((s,i)=>ctx.fillText(s,tx,ty+(i-(lines.length-1)/2)*fs*1.25+fs*0.35));
+      else ctx.fillText(L.text,tx,ty+fs*0.35);
+      ctx.textAlign="left";
+    }
+  }
   // 边(道路:白线,仿客户端)
   ctx.strokeStyle="#ffffff";ctx.lineWidth=clamp(view.s*0.09,1.2,4);ctx.lineCap="round";
   ctx.beginPath();
@@ -586,14 +612,15 @@ function drawAgv(a,px,py,col){
     drawPodIcon(0,0,l*0.4,(a.podCode||"").startsWith("P"));
     ctx.restore();
   }
-  ctx.restore();
-  if(stInfo(a.status)[1]==="chg"){        // 充电：金色闪电直接画在车身上（无圆底，不遮车身）
-    const s=l*0.30;
+  if(stInfo(a.status)[1]==="chg"){      // 充电闪电：正立六折点标准形再转90°——长轴沿车长、约半个车长（同官方）
+    ctx.save();ctx.rotate(Math.PI/2);
+    const s=l*0.25;
     ctx.fillStyle="#ffffff";ctx.beginPath();
-    ctx.moveTo(px+s*0.30,py-s*0.78);ctx.lineTo(px-s*0.44,py+s*0.14);ctx.lineTo(px+s*0.02,py+s*0.14);
-    ctx.lineTo(px-s*0.30,py+s*0.78);ctx.lineTo(px+s*0.44,py-s*0.14);ctx.lineTo(px+s*0.02,py-s*0.14);
-    ctx.closePath();ctx.fill();
+    ctx.moveTo(s*0.5,-s);ctx.lineTo(-s*0.5,s*0.1);ctx.lineTo(0,s*0.1);
+    ctx.lineTo(-s*0.4,s);ctx.lineTo(s*0.5,-s*0.2);ctx.lineTo(0,-s*0.2);
+    ctx.closePath();ctx.fill();ctx.restore();
   }
+  ctx.restore();
   // 编号徽标(上)+ 货架徽标(下)
   badge("#"+a.robotCode+(off?"·失联":""),px,py-w-6,"#0d1117",off?"#f85149":col);
   if(a.podCode)badge("📦 "+a.podCode,px,py+w+14,"#0d1117","#e6edf3");
@@ -646,6 +673,7 @@ $("sync").onclick=async()=>{
     b.textContent=j.err?("⚠ "+j.err.slice(0,30)):"✓ 已同步 "+Object.keys(j.ok).length+" 图";
     Object.keys(MAPCACHE).forEach(k=>delete MAPCACHE[k]);   // 地图已重拉：内存缓存必须失效，否则切图看到旧图
     await loadMap(curMap);                       // 重新拉取当前图 JSON
+    loadRets();                                  // 背景区域同步刷新（服务端 syncMaps 顺手重拉了 rets.json）
     loadPods();                                  // 服务端已顺手重拉货架清单：前端跟一次
   }catch(e){b.textContent="⚠ 同步失败";}
   setTimeout(()=>{b.disabled=false;b.textContent="⟳ 同步地图";},4000);
@@ -711,6 +739,7 @@ $("q").onkeydown=e=>{if(e.key==="Enter")doSearch();};
   $("mapSel").innerHTML=CFG.maps.map(m=>`<option value="${m}" ${m===curMap?"selected":""}>${m} ${CFG.mapNames[m]||""}</option>`).join("");
   $("mapSel").onchange=e=>switchMap(e.target.value);
   try{await loadMap(curMap);}catch(e){showMsg("地图加载失败:"+e.message);return;}
+  loadRets();                                      // 背景区域：启动拉一次（同步地图时服务端重拉）
   loadPods();                                    // 货架表：启动拉一次兜底；此后靠 SSE pods 事件
                                                  // （服务端按取/放货增量维护）+「同步货架」按钮人工校准
   sseConnect();

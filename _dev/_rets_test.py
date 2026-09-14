@@ -1,0 +1,181 @@
+# -*- coding: utf-8 -*-
+"""地图背景（rcs_rets）离线用例：XML 解析 + 空表保护 + 产物形状。
+
+不连 RCS（解析器是纯函数；落盘保护用假 opener 注入失败）。
+现场对账（可选，需本机能连 8181）：
+  python rcs_rets.py            # 重拉并打印各图 (多边形数, 标注数)
+  python _dev/_rets_test.py --live    # 拉真实数据并与现有 maps/rets.json 比对（应等价）
+"""
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+import rcs_rets as R                                   # noqa: E402
+
+fails = []
+
+
+def ok(cond, msg):
+    print(("  PASS " if cond else "  FAIL ") + msg)
+    if not cond:
+        fails.append(msg)
+
+
+def poly(pts, area=None):
+    s = "<MapRet>" + "".join('<Point xpos="%s" ypos="%s"/>' % p for p in pts)
+    if area:
+        s += "<Area " + area + "/>"
+    return s + "</MapRet>"
+
+
+# ---- 1) 多边形：单位换算 / 点数门槛 / 颜色属性顺序无关 ----
+print("[1] 多边形解析")
+one = R.parse_content(poly([(1500, 2500), (3500, 2500), (3500, 4500)],
+                          'color_a="255" color_r="218" color_g="220" color_b="223"'))
+ok(len(one["polys"]) == 1, "3 点应产出 1 个多边形")
+ok(one["polys"][0]["pts"] == [[1.5, 2.5], [3.5, 2.5], [3.5, 4.5]],
+   "毫米→米换算应为 x/1000（实际 %r）" % (one["polys"][0]["pts"],))
+ok(one["polys"][0]["color"] == "#dadcdf", "官方灰 a,r,g,b 顺序应解析为 #dadcdf")
+
+# 属性顺序被打乱也必须解析出同一颜色（旧实现用固定顺序正则会静默退回兜底灰）
+scrambled = R.parse_content(poly([(0, 0), (1000, 0), (0, 1000)],
+                                 'color_r="10" color_g="20" color_b="30" color_a="255"'))
+ok(scrambled["polys"][0]["color"] == "#0a141e",
+   "颜色属性乱序仍须解析正确（实际 %s）" % scrambled["polys"][0]["color"])
+
+ok(R.parse_content(poly([(0, 0), (1000, 0)]))["polys"] == [], "少于 3 点必须丢弃")
+ok(R.parse_content(poly([(0, 0), (1000, 0), (0, 1000)]))["polys"][0]["color"] == "#dadcdf",
+   "缺 <Area> 应退回兜底色而不是抛异常")
+
+# ---- 2) 标注：矩形中心 / 竖排 / 实体反转义 / 属性乱序 / 缺属性跳过 ----
+print("[2] 文字标注解析")
+nm = ('<RetName start_x="100" start_y="200" end_x="900" end_y="3800" size="14" '
+      'font="Microsoft YaHei" font_color_a="255" font_color_r="0" font_color_g="0" '
+      'font_color_b="0">待\n曝\n光\n区</RetName>')
+L = R.parse_content(nm)["labels"]
+ok(len(L) == 1 and L[0]["text"] == "待\n曝\n光\n区", "竖排逐字换行必须原样保留")
+ok(L[0]["x"] == 0.5 and L[0]["y"] == 2.0, "坐标为文字框中心（米）（实际 %r）" % ((L[0]["x"], L[0]["y"]),))
+ok(L[0]["h"] > L[0]["bw"], "竖排名须满足 框高>>框宽（bw=%.2f h=%.2f）" % (L[0]["bw"], L[0]["h"]))
+ok(L[0]["size"] == 14.0 and L[0]["font"] == "Microsoft YaHei", "字号/字体须透传")
+
+ent = R.parse_content('<RetName start_x="0" start_y="0" end_x="1000" end_y="1000" '
+                      'size="12" font_color_r="0" font_color_g="0" font_color_b="0">'
+                      '开料&amp;内层前处理</RetName>')["labels"]
+ok(ent and ent[0]["text"] == "开料&内层前处理", "&amp; 必须反转义（否则漏字）")
+
+sc = R.parse_content('<RetName end_x="100" end_y="200" start_x="900" start_y="3800" size="13" '
+                     'font_color_r="1" font_color_g="2" font_color_b="3">X</RetName>')["labels"]
+ok(sc and sc[0]["x"] == 0.5 and sc[0]["color"] == "#010203",
+   "标注属性乱序仍须解析正确（x=%.2f color=%s）" % (sc[0]["x"], sc[0]["color"]))
+
+ok(R.parse_content('<RetName size="9">X</RetName>')["labels"] == [],
+   "缺坐标属性的标注须跳过而不是整层崩掉")
+
+# ---- 3) 落盘保护：全失败不得把已有背景抹成空 ----
+print("[3] 全量失败时的空表保护")
+path = R.OUT_PATH
+bak = open(path, "rb").read() if os.path.exists(path) else None
+try:
+    with open(path, "w", encoding="utf-8") as f:     # 先埋一份"好背景"
+        json.dump({"ts": 1.0, "maps": {"BB": {"polys": [{"pts": [[0, 0], [1, 0], [0, 1]],
+                                                          "color": "#dadcdf"}], "labels": []}}}, f)
+
+    class Boom:
+        def open(self, *a, **k):
+            raise RuntimeError("模拟每图请求失败")
+
+    orig_login = R._login_opener
+    R._login_opener = lambda *a, **k: Boom()
+    try:
+        res = R.pull_all()
+    finally:
+        R._login_opener = orig_login
+    after = json.load(open(path, encoding="utf-8"))["maps"]
+    ok(after.get("BB", {}).get("polys"), "四图全失败时必须保留旧背景（实际 %r）" % (sorted(after),))
+    ok(res.get("BB", {}).get("polys"), "全失败时返回值也应是旧背景（而非空）")
+
+    # 全失败且旧产物已损坏/不存在 -> 允许写空，但不能抛异常
+    os.remove(path)
+    R._login_opener = lambda *a, **k: Boom()
+    try:
+        R.pull_all()
+    except Exception as e:
+        ok(False, "无旧产物且全失败时不得抛异常：%r" % (e,))
+    else:
+        ok(json.load(open(path, encoding="utf-8"))["maps"] == {}, "无旧产物时写空表可接受")
+    R._login_opener = orig_login
+
+    # 部分成功时必须合并保留未成功图的旧数据
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"ts": 1.0, "maps": {"BB": {"polys": [{"pts": [[9, 9], [9, 8], [8, 9]], "color": "#000000"}], "labels": []},
+                                       "CC": {"polys": [{"pts": [[1, 1], [1, 2], [2, 1]], "color": "#000000"}], "labels": []}}}, f)
+
+    class HalfOp:
+        def open(self, req, *a, **k):
+            body = json.loads(req.data.decode())
+            if body["mapCode"] != "CC":
+                raise RuntimeError("除 CC 外都失败")
+
+            class Resp:
+                def read(self):
+                    return json.dumps({"shareInfos": [{"type": "1", "content": poly(
+                        [(0, 0), (1000, 0), (0, 1000)], 'color_r="1" color_g="2" color_b="3"')}]}).encode()
+            return Resp()
+
+    R._login_opener = lambda *a, **k: HalfOp()
+    try:
+        R.pull_all()
+    finally:
+        R._login_opener = orig_login
+    after = json.load(open(path, encoding="utf-8"))["maps"]
+    ok(after.get("BB", {}).get("polys"), "部分成功时未成功图的旧背景必须保留（实际 %r）" % (sorted(after),))
+    ok(after.get("CC", {}).get("polys") and after["CC"]["polys"][0]["color"] == "#010203",
+       "成功图必须被新数据覆盖")
+finally:
+    if bak is not None:
+        with open(path, "wb") as f:
+            f.write(bak)                              # 还原真实产物
+    else:
+        os.path.exists(path) and os.remove(path)
+
+# ---- 4) 现场产物形状（有 maps/rets.json 就跑；无则跳过）----
+print("[4] 现有产物形状")
+if bak:
+    d = json.loads(bak)
+    ok(isinstance(d.get("ts"), (int, float)), "产物须带 ts")
+    maps = d.get("maps") or {}
+    ok(bool(maps), "产物须含至少一张图（实际 %r）" % (sorted(maps),))
+    bad = []
+    for qr, v in maps.items():
+        for p in v.get("polys") or []:
+            if len(p.get("pts") or []) < 3:
+                bad.append("%s:多边形点数不足" % qr)
+            if not (p.get("color") or "").startswith("#"):
+                bad.append("%s:颜色非法" % qr)
+        for L in v.get("labels") or []:
+            if "x" not in L or "y" not in L:
+                bad.append("%s:标注缺坐标" % qr)
+    ok(not bad, "现有产物结构必须合法（%s）" % ("; ".join(bad[:3]) or "OK"))
+else:
+    print("  SKIP 无 maps/rets.json（未同步过地图）")
+
+# ---- 5) 可选：真实数据对账 ----
+if "--live" in sys.argv:
+    print("[5] 现场对账（重拉并比对现有产物）")
+    old = json.loads(bak)["maps"] if bak else {}
+    try:
+        new = R.pull_all()
+    except Exception as e:
+        print("  SKIP 无法连接现场（%s）" % e)
+    else:
+        same = json.dumps({k: old.get(k) for k in new}, sort_keys=True, ensure_ascii=False) == \
+            json.dumps({k: new[k] for k in new}, sort_keys=True, ensure_ascii=False)
+        ok(same, "重拉结果应与现有产物等价（否则解析逻辑有变动）")
+
+print("")
+if fails:
+    print("RETS FAIL：%d 项未通过" % len(fails))
+    sys.exit(1)
+print("RETS PASS：地图背景解析与落盘保护全部通过")

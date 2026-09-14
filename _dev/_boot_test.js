@@ -54,6 +54,11 @@ function fakeFetch(url){
   if(mm)return Promise.resolve({ok:true,json:()=>Promise.resolve(
     JSON.parse(fs.readFileSync(path.join(ROOT,'maps',mm[1]+'.json'),'utf8')))});
   if(url==='api/pods')return Promise.resolve({ok:true,json:()=>Promise.resolve(PODS_PAYLOAD)});
+  if(/^maps\/rets\.json/.test(url)){                     // 背景区域：读真实产物，缺文件则给空表
+    try{return Promise.resolve({ok:true,json:()=>Promise.resolve(
+      JSON.parse(fs.readFileSync(path.join(ROOT,'maps','rets.json'),'utf8')))});}
+    catch(e){return Promise.resolve({ok:true,json:()=>Promise.resolve({ts:0,maps:{}})});}
+  }
   return Promise.resolve({ok:true,json:()=>Promise.resolve({ok:{},err:null})});
 }
 class FakeES{constructor(u){esInstances.push(this);this.url=u;}close(){}}
@@ -106,6 +111,17 @@ catch(e){ ok(false,'脚本执行抛异常: '+e.message); process.exit(1); }
   await ctx.switchMap('BB');
   ok(esInstances.length===3&&esInstances[2].url==='/api/events?map=BB','换回原图应再订一次 BB');
   ok(bbFetches()===1,'地图内存缓存生效：来回切图不应重复拉 maps/BB.json（实际 '+bbFetches()+' 次）');
+  ok(fetched.some(u=>/^maps\/rets\.json/.test(u)),'启动链必须拉取地图背景 maps/rets.json（实际 '+fetched.join(',')+'）');
+  // RETS 是 index.html 里的 let 声明，不挂到 sandbox 上，只能在 vm 上下文里求值。
+  // fetch 是异步的，loadRets() 要等微任务冲洗完才落值——前面等启动链的循环已冲到 mapSel 填充，
+  // 这里再补一轮，确保 loadRets 的 continuation 已经跑过。
+  for(let i=0;i<10;i++) await new Promise(r=>setImmediate(r));
+  const RETS=vm.runInContext('typeof RETS==="undefined"?null:RETS',ctx);
+  ok(RETS&&typeof RETS==='object','背景数据必须落到 RETS（实际 '+typeof RETS+'）');
+  ok(RETS&&RETS.BB&&Array.isArray(RETS.BB.polys),
+     '背景必须按图码分图存放（BB 缺 polys：'+(RETS?Object.keys(RETS).join('/'):'RETS 为空')+'）');
+  ok(!RETS||Object.keys(RETS).every(k=>Array.isArray(RETS[k].labels)),
+     '每张图的背景都必须带 labels 数组（渲染按 ret.labels 遍历，缺了会抛异常）');
 
   // ---- 喂一条真实推送状态帧（取自现场快照样本），再跑两帧渲染 ----
   const snap=JSON.parse(fs.readFileSync(path.join(ROOT,'snap_tmp.json'),'utf8'));
