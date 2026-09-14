@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""地图背景（区域多边形+文字标注）与区域字典（区域码→中文名、地标码→区域名）。
+"""地图背景（区域多边形+文字标注）与区域字典（区域码→中文名、地标码→区域名、区域名→库区序号）。
 
-三份数据都是**随布局改版才动**的低频内容，因此**只在「⟳同步地图」时拉**：
+四份数据都是**随布局改版才动**的低频内容，因此**只在「⟳同步地图」时拉**：
   1) 背景：POST {WEB_BASE}/rcms/services/rest/clientService/getShareMapInfoByMapCode
      {"mapCode":"BB"} -> shareInfos:[{type:"1", content:<MapRetCfg XML>}]
      XML 单位毫米；<MapRet>=多边形+<Area>填充色，<RetName>=文字标注（矩形区域+字号+颜色）。
@@ -10,9 +10,14 @@
   3) 地标码→区域名：POST {WEB_BASE}/rcms/web/mapData/findListWithPages.action（form，start/limit 分页）
      一行一个地标（含空储位），行含 dataName/areaCode(中文名)/stgSecCode/dataTyp —— 「地图数据」整张表。
      **这份与货架在不在无关**，是空储位悬停能显示区域的唯一数据源。
-  三者都是登录 Cookie 即可、无 IP 白名单（2026-09-13/14 实测四图全有数据）。
+     保留带区域名的储位类(0/1)与工作区(10)；路径点(16)/门/充电区不标区域。
+  4) 区域名→库区序号：POST {WEB_BASE}/rcms/web/stgSec/getStgSec4Ocx.action（form）
+     {"mapCode":"BB"} -> [{areaTypText(区域中文名), maskNum(库区序号，全局唯一), areaTypCode, stgSecCode...}]
+     客户端「地图编辑→库区编辑→库区类型名称」下拉即此数据；**序号 maskNum 全局唯一＝区域的可靠来源**，
+     与 (3) 的 areaCode 按 areaTypText 精确匹配（实测四图 100% 命中）。
+  四者都是登录 Cookie 即可、无 IP 白名单（2026-09-13/14 实测四图全有数据）。
 
-产物 maps/rets.json 给前端叠底图 + 悬停译区域名。
+产物 maps/rets.json 给前端叠底图 + 悬停译区域名/序号。
 **不要在服务启动时调用本模块**（启动只做货架校准）；本机静态文件已够用，
 RCS 侧只有「同步地图」这一次请求——见 server.py 的 syncMaps 与 _dev/_rets_test.py 的防回归断言。
 """
@@ -113,9 +118,11 @@ def pull_slot_areas(op, map_code, timeout=20, page=500):
     """地标码→区域名（A12 mapData/findListWithPages.action，form POST、须 start/limit 分页）。
     这是「地图数据」整张表：一行一个地标，行含 dataName(地标码)、areaCode(区域名)、stgSecCode(库区)、
     dataTyp(类型)、cooX/cooY(毫米)。**与货架在不在无关**——空储位也有行、也带区域，
-    正是「空储位悬停要显示区域」的数据源（2026-09-14 探针确认：储位类 dataTyp∈{0,1}
-    的区域覆盖 BB/CC/DD/EE = 77%/100%/74%/98%）。
-    只留储位类且区域非空的行，键=地标码(dataName)，值=区域名(areaCode ← 此处实为中文名)。
+    正是「空储位悬停要显示区域」的数据源。
+    保留**带区域名的非路径点**行：储位类 dataTyp∈{0,1} + **工作区 dataTyp=10**
+    （2026-09-14 用户报 `007432BB050163`/字符机台区 漏网：它 dataTyp=10，被旧的白名单过滤掉了；
+    工作区同样带区域名，四图 EE/BB/CC/DD = 16/8/40/7 个。路径点(16)/门/充电区等不带区域名，自然过滤）。
+    键=地标码(dataName)，值=区域名(areaCode ← 此处实为中文名)。
     返回 dict；整体失败抛异常（由 pull_all 决定是否沿用旧值）。"""
     out, start = {}, 1
     while True:
@@ -126,7 +133,9 @@ def pull_slot_areas(op, map_code, timeout=20, page=500):
         js = json.loads(op.open(req, timeout=timeout).read().decode("utf-8"))
         rows = js.get("data") or []
         for r in rows:
-            if str(r.get("dataTyp")) not in ("0", "1"):       # 只储位：工作区/路径点等不标区域
+            # 只认带区域名的行：储位(0/1)与工作区(10)会标区域，路径点/门/充电区不标。
+            # 不写死白名单，改为「区域名非空即收」，避免再漏掉官方以后新增的带区域类型。
+            if str(r.get("dataTyp")) not in ("0", "1", "10"):
                 continue
             code, area = (r.get("dataName") or "").strip(), (r.get("areaCode") or "").strip()
             if code and area:
@@ -134,6 +143,27 @@ def pull_slot_areas(op, map_code, timeout=20, page=500):
         if len(rows) < page:                                  # 最后一页
             return out
         start += 1
+
+
+def pull_area_seq(op, map_code, timeout=12):
+    """区域名→库区序号（stgSec/getStgSec4Ocx.action，form POST，登录 Cookie 即可）。
+    客户端的「地图编辑→库区编辑→库区类型名称」下拉就是这份：每行 areaTypText(区域中文名)、
+    maskNum(库区序号，**全局唯一、跨图也不重复** —— 2026-09-14 实测 128 个名 ↔ 128 个序号一一对应)、
+    areaTypCode / stgSecCode / stgSecText（库区码）。用户口径：**序号值才是区域的可靠来源**。
+    与 A12 的 areaCode 由 **areaTypText 精确匹配**（实测四图 10/7/12/84 个区域名 100% 命中）。
+    返回 {区域名: maskNum}；整体失败抛异常。"""
+    req = urllib.request.Request(
+        C.WEB_BASE + "/rcms/web/stgSec/getStgSec4Ocx.action",
+        data=("mapCode=%s" % map_code).encode(), method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    rows = json.loads(op.open(req, timeout=timeout).read().decode("utf-8"))
+    out = {}
+    for r in rows or []:
+        name = (r.get("areaTypText") or "").strip()
+        seq = r.get("maskNum")
+        if name and seq is not None:
+            out[name] = seq
+    return out
 
 
 def pull_all(maps=None, timeout=15):
@@ -164,8 +194,13 @@ def pull_all(maps=None, timeout=15):
             except Exception as e:
                 print("rcs_rets: %s 地标区域表拉取失败(%s)" % (mc, str(e)[:60]), file=sys.stderr, flush=True)
                 slot_areas = None
+            try:
+                area_seq = pull_area_seq(op, mc)       # 区域名→库区序号 maskNum（可靠来源；单独失败不抹背景）
+            except Exception as e:
+                print("rcs_rets: %s 库区序号表拉取失败(%s)" % (mc, str(e)[:60]), file=sys.stderr, flush=True)
+                area_seq = None
             out[mc] = {"polys": merged["polys"], "labels": merged["labels"],
-                       "areas": areas, "slotAreas": slot_areas}
+                       "areas": areas, "slotAreas": slot_areas, "areaSeq": area_seq}
         except Exception as e:
             print("rcs_rets: %s 拉取失败(%s)" % (mc, str(e)[:70]), file=sys.stderr, flush=True)
     try:                                          # 旧产物：部分失败时保留旧图数据，别让背景整层消失
@@ -186,6 +221,8 @@ def pull_all(maps=None, timeout=15):
                 v["areas"] = prev.get("areas") or {}
             if v.get("slotAreas") is None:         # 地标区域表没拉到：同样沿用旧值（空储位别突然没区域）
                 v["slotAreas"] = prev.get("slotAreas") or {}
+            if v.get("areaSeq") is None:           # 库区序号表没拉到：沿用旧值
+                v["areaSeq"] = prev.get("areaSeq") or {}
             # 旧产物可能是上一版（没有 areas 键）留下的条目：这里一律补齐，避免前端退化显示原始码
             for k in ("polys", "labels"):
                 v.setdefault(k, [])
@@ -193,6 +230,7 @@ def pull_all(maps=None, timeout=15):
         for qr, v in old.items():                 # 失败图也补键（前端取 RETS[qr].areas / .slotAreas）
             v.setdefault("areas", {})
             v.setdefault("slotAreas", {})
+            v.setdefault("areaSeq", {})
             v.setdefault("polys", [])
             v.setdefault("labels", [])
         out = old
@@ -201,7 +239,8 @@ def pull_all(maps=None, timeout=15):
         json.dump({"ts": time.time(), "maps": out}, f, ensure_ascii=False)
     os.replace(tmp, OUT_PATH)
     print("rcs_rets: 背景已更新 %s" % {k: (len(v.get("polys") or []), len(v.get("labels") or []),
-                                              len(v.get("areas") or {}), len(v.get("slotAreas") or {}))
+                                              len(v.get("areas") or {}), len(v.get("slotAreas") or {}),
+                                              len(v.get("areaSeq") or {}))
                                        for k, v in out.items()},
           flush=True)
     return out

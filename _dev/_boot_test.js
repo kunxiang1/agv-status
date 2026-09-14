@@ -126,14 +126,16 @@ catch(e){ ok(false,'脚本执行抛异常: '+e.message); process.exit(1); }
      '每张图的背景都必须带 areas 字典（悬停提示靠它把 areaCode 译成中文名；缺了会退化成显示原始码）');
   ok(!RETS||Object.keys(RETS).every(k=>RETS[k].slotAreas&&typeof RETS[k].slotAreas==='object'),
      '每张图的背景都必须带 slotAreas 字典（空储位悬停靠它显示区域；缺了空储位就只剩地标号）');
-  // 空储位悬停：用真实地图节点 + 真实 slotAreas 验证 cellCode/slotAreaName/hitSlot 三条链路。
+  ok(!RETS||Object.keys(RETS).every(k=>RETS[k].areaSeq&&typeof RETS[k].areaSeq==='object'),
+     '每张图的背景都必须带 areaSeq 字典（区域名→库区序号；序号全局唯一＝区域可靠标识，rcs 侧判据）');
+  // 用户 2026-09-14 报的漏网案例：工作区(dataTyp=10) 也带区域，code/slotAreaName/hitSlot 三链路都得覆盖它。
   // 取一个「确实没货架、但 slotAreas 里有区域」的地图节点——这正是用户要的场景。
   const M=JSON.parse(fs.readFileSync(path.join(ROOT,'maps','BB.json'),'utf8'));
   const occupied=new Set((PODS_PAYLOAD.pods.BB||[]).map(p=>Math.round(p.x*1000)+'BB'+Math.round(p.y*1000)));
   const sa=RETS&&RETS.BB&&RETS.BB.slotAreas||{};
   const n6=v=>Math.round(v*1000).toString().padStart(6,'0');   // 米→6位毫米（地标码的一节）
-  const cand=M.nodes.find(n=>(n[3]===0||n[3]===1)&&sa[Math.round(n[1]*1000).toString().padStart(6,'0')+'BB'+
-        Math.round(n[2]*1000).toString().padStart(6,'0')]&&!occupied.has(
+  const HASAREA=n=>(n[3]===0||n[3]===1||n[3]===10)&&sa[n6(n[1])+'BB'+n6(n[2])];
+  const cand=M.nodes.find(n=>HASAREA(n)&&!occupied.has(
         Math.round(n[1]*1000)+'BB'+Math.round(n[2]*1000)));
   if(cand){
     const cc=vm.runInContext('cellCode',ctx)(cand[1],cand[2]);
@@ -142,9 +144,29 @@ catch(e){ ok(false,'脚本执行抛异常: '+e.message); process.exit(1); }
     ok(nm===sa[cc],'slotAreaName 必须按 cellCode 命中 slotAreas（'+cc+' → '+nm+'）');
     ok(!!nm,'空储位样本必须能译出区域名（实际 '+JSON.stringify(nm)+'）');
   }else{
-    // 现场一定有大量空储位（实测 BB/CC/DD/EE 共 147 个空储位），找不到样本＝slotAreas 或地图/固件对不上，
+    // 现场一定有大量空储位（实测 BB/CC/DD/EE 共 147+ 个空储位），找不到样本＝slotAreas 或地图/固件对不上，
     // 那是真回归不是可忽略的跳过——必须显式失败，否则这条断言会静默失效（下轮坏了也不知道）。
     ok(false,'必须能找到「空且有区域」的储位样本（实际没找到：slotAreas 为空或与地图坐标不匹配？）');
+  }
+  // 工作区地标专项：用户报的 007432BB050163（A12 dataTyp=10）必须能译出区域。
+  // 注：地图节点类型与 A12 的 dataTyp 是**两套编码**——A12 标 10 的工作区地标，在地图上多数仍是
+  // 储位(0)（实测地图类型10 与 slotAreas 零交集），所以前端 hitSlot 只认 0/1 即可，无需加 10。
+  {
+    const sa2=((RETS||{}).BB||{}).slotAreas||{};
+    ok(sa2['007432BB050163']==='字符机台区',
+       '工作区地标 007432BB050163 必须译出区域（用户 2026-09-14 报的漏网案例；'
+       +'旧版 dataTyp 白名单只收 0/1 → 工作区被过滤。实际 '+JSON.stringify(sa2['007432BB050163'])+'）');
+    // slotAreaName 按坐标算出的码必须能命中原案例（该坐标在 BB 图上是类型 0 储位节点）
+    const M2=JSON.parse(fs.readFileSync(path.join(ROOT,'maps','BB.json'),'utf8'));
+    const nd=M2.nodes.find(n=>n6(n[1])+'BB'+n6(n[2])==='007432BB050163');
+    ok(!!nd,'007432BB050163 必须是 BB 图上的真实节点（实际 '+(nd?'[类型'+nd[3]+']':'未找到')+'）');
+    if(nd){
+      ok(vm.runInContext('slotAreaName',ctx)(nd[1],nd[2])==='字符机台区',
+         'slotAreaName 对该工作区地标也要译出区域（前端按坐标命中，与 A12 的 dataTyp 编码无关）');
+      const hit=vm.runInContext('hitSlot',ctx)(vm.runInContext('P',ctx)(nd[1],nd[2])[0],
+                                              vm.runInContext('P',ctx)(nd[1],nd[2])[1]);
+      ok(hit&&hit.area==='字符机台区','hitSlot 必须命中该工作区地标并带出区域（实际 '+JSON.stringify(hit)+'）');
+    }
   }
   // 背景/区域名是低频数据：启动只读本机静态文件，绝不允许触发任何服务端"联系 RCS"的端点。
   // （syncMaps/syncPods 会登录 CMS，连点还会触发 30s 节流——启动绝不该碰。）
@@ -200,10 +222,13 @@ catch(e){ ok(false,'脚本执行抛异常: '+e.message); process.exit(1); }
     ok(!herr,'空储位悬停不得抛异常：'+(herr&&herr.stack||''));
     const tip=el('tip').textContent||'';
     const expectCode=vm.runInContext('cellCode',ctx)(cand[1],cand[2]);
+    const isWs=cand[3]===10;                                 // 工作区显示"工作区"，储位显示"储位"
     ok((el('tip').style.display==='block'),'空储位悬停应显示提示条（实际 display='+el('tip').style.display+'）');
-    ok(tip.includes('储位')&&tip.includes(expectCode),'提示条应含「储位 '+expectCode+'」（实际「'+tip+'」）');
+    ok(tip.includes(isWs?'工作区':'储位')&&tip.includes(expectCode),
+       '提示条应含「'+(isWs?'工作区':'储位')+' '+expectCode+'」（实际「'+tip+'」）');
     ok(tip.includes(sa[expectCode]),'提示条应含区域「'+sa[expectCode]+'」（实际「'+tip+'」）');
     ok(tip.includes('货架 无'),'空储位的货架号应留空显示「无」（实际「'+tip+'」）');
+    ok(!tip.includes('序号'),'序号是内部判据，界面上不显示（实际「'+tip+'」）');
     // 移到远处应隐藏，避免提示条粘住
     el('cv').onmousemove({offsetX:-999,offsetY:-999});
     ok(el('tip').style.display==='none','移出储位后提示条应隐藏');

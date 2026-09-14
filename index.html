@@ -778,12 +778,12 @@ cv.onmousemove=e=>{
       // A12 缺该地标才退回 A11（货架表 areaCode → 中文名），再缺就显示原始码。
       const pos=ph.pos||cellCode(ph.x,ph.y), sa=slotAreaName(ph.x,ph.y);
       const ar=sa||areaName(ph.area)||"-";
-      tip.textContent=`${ph.pal?"托盘":"货架"} ${ph.code}\n区域 ${ar}${!sa&&ph.area&&ar!==ph.area?"("+ph.area+")":""} · 储位 ${pos}`;
+      tip.textContent=`${ph.pal?"托盘":"货架"} ${ph.code}\n区域 ${ar}${!sa&&ph.area&&ar!==ph.area?"("+ph.area+")":""}\n储位 ${pos}`;
       // pos 兜底合成=接口 positionCode 同规则（增量放货记录无 pos 时，实测与 RCS 真值逐位一致）
     }else{
-      // 空储位：地标与区域在「地图数据」表里与货架无关，照常显示；只是没有货架号 → 留"无"
+      // 空储位/工作区：地标与区域在「地图数据」表里与货架无关，照常显示；只是没有货架号 → 留"无"
       const ar=sl.area||"-";                        // A12（地图数据表）按地标码给的区域名，已是中文
-      tip.textContent=`储位 ${cellCode(sl.x,sl.y)}\n区域 ${ar} · 货架 无`;
+      tip.textContent=`${sl.tp===10?"工作区":"储位"} ${cellCode(sl.x,sl.y)}\n区域 ${ar} · 货架 无`;
     }
     cv.style.cursor="pointer";}
   else{tip.style.display="none";cv.style.cursor="";}
@@ -812,20 +812,22 @@ function n6(v){return Math.round(v*1000).toString().padStart(6,"0");}   // 米 �
 function cellCode(x,y,qr){                         // 坐标 → 地标/储位号（6位x毫米+图码+6位y毫米）
   return n6(x)+(qr||map?.qr||"")+n6(y);            // ＝A12 的 dataName ＝接口 positionCode，逐位一致
 }
-function slotAreaName(x,y,qr){                     // 储位地标 → 区域名（RETS[qr].slotAreas，见 §3.6 A12）
+function slotAreaName(x,y,qr){                     // 储位/工作区地标 → 区域名（RETS[qr].slotAreas，见 §3.6 A12）
   const q=qr||map?.qr,qc=((RETS&&RETS[q]&&RETS[q].slotAreas)||{});
   return qc[cellCode(x,y,q)]||"";
 }
 function hitSlot(px,py){                           // 空储位命中：只认储位节点（类型 0/1，与货架落点候选同一口径）
-  if(!map)return null;
-  const R=clamp(0.31*view.s,6,56);                 // 与货架图标同尺寸：空储位悬停范围＝图标视觉范围
-  let best=null,bd=R;
+  if(!map)return null;                             // 注：地图节点类型与 A12 的 dataTyp 是两套编码——
+  const R=clamp(0.31*view.s,6,56);                 // A12 里标 dataTyp=10 的工作区地标，在地图上多数仍是储位(0)，
+  let best=null,bd=R;                              // 故这里只认 0/1 即可（实测地图类型10 与 slotAreas 零交集）。
   for(const n of map.nodes){
     const tp=n[3];if(tp!==0&&tp!==1)continue;
     const[x,y]=P(n[1],n[2]),d=Math.hypot(x-px,y-py);
     if(d<bd){bd=d;best=n;}}
   if(!best)return null;
-  return{x:best[1],y:best[2],area:slotAreaName(best[1],best[2])};
+  const ar=slotAreaName(best[1],best[2]);
+  if(!ar)return null;                              // 该地标没区域名（未入库/未配置）→ 不弹提示，避免空壳
+  return{x:best[1],y:best[2],area:ar,tp:best[3]};
 }
 
 // ---------- 侧栏 ----------

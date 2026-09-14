@@ -226,21 +226,47 @@ try:
         {"dataName": "058518BB068475", "areaCode": "", "dataTyp": "16", "stgSecCode": ""},   # 路径点：跳过
         {"dataName": "045132BB062396", "areaCode": "", "dataTyp": "1", "stgSecCode": ""},    # 储位但无区域：跳过
         {"dataName": "045132BB061426", "areaCode": "字符暂存区", "dataTyp": "0", "stgSecCode": "zfh"},
+        {"dataName": "007432BB050163", "areaCode": "字符机台区", "dataTyp": "10", "stgSecCode": "字符机台"},  # 工作区：**要收**（用户 2026-09-14 报漏网）
+        {"dataName": "028939BB048068", "areaCode": "", "dataTyp": "10", "stgSecCode": ""},   # 工作区但无区域：跳过
         {"dataName": "", "areaCode": "无名区", "dataTyp": "1", "stgSecCode": ""},             # 缺地标码：跳过
     ]
     sa = R.pull_slot_areas(PagesOp(rows_a12), "BB", page=2)   # page=2 逼它翻多页
-    ok(sa == {"045132BB065293": "外形机台储位", "045132BB061426": "字符暂存区"},
-       "只留「储位类(0/1) 且 区域非空」的行，键=地标码 值=区域名（实际 %r）" % (sa,))
+    ok(sa == {"045132BB065293": "外形机台储位", "045132BB061426": "字符暂存区",
+              "007432BB050163": "字符机台区"},
+       "只留「带区域名的储位类(0/1)+工作区(10)」，键=地标码 值=区域名（实际 %r）" % (sa,))
+    ok("058518BB068475" not in sa, "路径点(16) 无区域名，必须被过滤（否则悬停会冒出无意义条目）")
     ok(R.pull_slot_areas(PagesOp([]), "BB") == {}, "空表应返回空字典且不抛异常")
 
-    # ---- 3e) 地标区域表的独立失败保护（与 A11 字典同一口径）----
-    print("[3e] 地标区域表独立失败保护")
-    orig_sa = R.pull_slot_areas
+    # ---- 3d2) 区域名→库区序号（stgSec/getStgSec4Ocx，客户端「库区编辑→库区类型名称」同源）----
+    print("[3d2] 库区序号表解析（getStgSec4Ocx）")
+    class SecOp:
+        """getStgSec4Ocx 返回的是**数组**（不是 {rows:...}）。"""
+        def __init__(self, rows): self.rows = rows
+        def open(self, req, *a, **k):
+            data = self.rows
+            class Resp:
+                def read(self): return json.dumps(data).encode()
+            return Resp()
+    rows_sec = [
+        {"areaTypText": "字符机台区", "maskNum": 109, "areaTypCode": "ZFJT", "stgSecCode": "6"},
+        {"areaTypText": "沉金暂存区", "maskNum": 128, "areaTypCode": "10", "stgSecCode": "10l"},
+        {"areaTypText": "", "maskNum": 999, "areaTypCode": "x"},          # 缺名：跳过
+        {"areaTypText": "无序号区", "maskNum": None, "areaTypCode": "y"},  # 缺序号：跳过
+    ]
+    seq = R.pull_area_seq(SecOp(rows_sec), "BB")
+    ok(seq == {"字符机台区": 109, "沉金暂存区": 128},
+       "区域名→maskNum；缺名或缺序号的行走跳过（实际 %r）" % (seq,))
+    ok(R.pull_area_seq(SecOp([]), "BB") == {}, "空表应返回空字典")
+
+    # ---- 3e) 地标区域表 + 库区序号表的独立失败保护（与 A11 字典同一口径）----
+    print("[3e] 地标区域表/库区序号表独立失败保护")
+    orig_sa, orig_seq = R.pull_slot_areas, R.pull_area_seq
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"ts": 1.0, "maps": {
                 "BB": {"polys": [{"pts": [[0, 0], [1, 0], [0, 1]], "color": "#000000"}], "labels": [],
-                       "areas": {"zfh": "阻焊火山灰"}, "slotAreas": {"045132BB065293": "外形机台储位"}}}}, f)
+                       "areas": {"zfh": "阻焊火山灰"}, "slotAreas": {"045132BB065293": "外形机台储位"},
+                       "areaSeq": {"字符机台区": 109}}}}, f)
 
         class OkOp2:
             def open(self, req, *a, **k):
@@ -253,17 +279,23 @@ try:
         R._login_opener = lambda *a, **k: OkOp2()
         R.pull_areas = lambda op, mc, timeout=12: {"zfh": "阻焊火山灰"}
         R.pull_slot_areas = lambda op, mc, timeout=20, page=500: (_ for _ in ()).throw(RuntimeError("A12 挂了"))
+        R.pull_area_seq = lambda op, mc, timeout=12: (_ for _ in ()).throw(RuntimeError("4Ocx 挂了"))
         try:
             R.pull_all()
         finally:
-            R._login_opener, R.pull_areas, R.pull_slot_areas = orig_login, orig_areas, orig_sa
+            R._login_opener, R.pull_areas, R.pull_slot_areas, R.pull_area_seq = \
+                orig_login, orig_areas, orig_sa, orig_seq
         after = json.load(open(path, encoding="utf-8"))["maps"]
         ok(after["BB"].get("slotAreas") == {"045132BB065293": "外形机台储位"},
            "地标区域表单独失败时，已有映射必须保留（否则空储位区域突然消失）（实际 %r）" % (after["BB"].get("slotAreas"),))
+        ok(after["BB"].get("areaSeq") == {"字符机台区": 109},
+           "库区序号表单独失败时，已有序号必须保留（实际 %r）" % (after["BB"].get("areaSeq"),))
         missing2 = [k for k, v in after.items() if "slotAreas" not in v]
         ok(not missing2, "所有图都必须带 slotAreas 键（缺 %r 会让空储位取不到区域）" % (missing2,))
+        missing3 = [k for k, v in after.items() if "areaSeq" not in v]
+        ok(not missing3, "所有图都必须带 areaSeq 键（缺 %r 悬停显示不了序号）" % (missing3,))
     finally:
-        R.pull_slot_areas = orig_sa
+        R.pull_slot_areas, R.pull_area_seq = orig_sa, orig_seq
 finally:
     if bak is not None:
         with open(path, "wb") as f:
@@ -297,10 +329,22 @@ if bak:
         elif not isinstance(v["slotAreas"], dict):
             bad.append("%s:slotAreas 不是字典" % qr)
         else:
-            for k, nm in v["slotAreas"].items():       # 键=地标码（6位x毫米+图码+6位y毫米 = 14 字符），值=区域名
-                if len(k) != 14 or k[6:8] != qr or not nm:
-                    bad.append("%s:slotAreas 条目非法 %r→%r" % (qr, k, nm))
-                    break
+            legacy = 0                                 # 官方偶有「1+7位x+图码+7位y」16 位老式码（DD 实测 1 条），
+            for k, nm in v["slotAreas"].items():       # 前端 cellCode() 只产 14 位、永远匹配不上 → 无害，容忍
+                if not nm:
+                    bad.append("%s:slotAreas 条目空值 %r" % (qr, k)); break
+                if len(k) == 16 and k[7:9] == qr:      # 16 位老式码（1+7位x+图码+7位y）
+                    legacy += 1; continue
+                if len(k) != 14 or k[6:8] != qr:       # 常规：6位x毫米+图码+6位y毫米 = 14 字符
+                    bad.append("%s:slotAreas 条目非法 %r→%r" % (qr, k, nm)); break
+        if "areaSeq" not in v:
+            bad.append("%s:缺 areaSeq 键（库区序号＝区域可靠标识，rcs 侧判据）" % qr)
+        elif not isinstance(v["areaSeq"], dict):
+            bad.append("%s:areaSeq 不是字典" % qr)
+        else:
+            for nm, sq in v["areaSeq"].items():        # 键=区域名，值=库区序号（整数）
+                if not nm or isinstance(sq, bool) or not isinstance(sq, (int, float)):
+                    bad.append("%s:areaSeq 条目非法 %r→%r" % (qr, nm, sq)); break
     ok(not bad, "现有产物结构必须合法（%s）" % ("; ".join(bad[:3]) or "OK"))
 else:
     print("  SKIP 无 maps/rets.json（未同步过地图）")
